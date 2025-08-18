@@ -266,7 +266,7 @@ def list_drives(campaign_id: Optional[int]=None):
     with db_conn() as con:
         return pd.read_sql_query(sql, con, params=params)
 
-def ingest_forms(up_df: pd.DataFrame, field_map: Dict[str,str], campaign_name: str) -> Dict[str,int]:
+def ingest_forms(up_df: pd.DataFrame, field_map: Dict[str,str], campaign_name: str, is_test: int = 0) -> Dict[str,int]:
     detected = 0
     inserted = 0
     updated = 0
@@ -282,7 +282,7 @@ def ingest_forms(up_df: pd.DataFrame, field_map: Dict[str,str], campaign_name: s
             "notes": r.get(field_map.get("notes"), ""),
             "campaign": campaign_name,
         }
-        cid, action = upsert_candidate(row)
+           cid, action = upsert_candidate(row, is_test=is_test)
         detected += 1
         if action.startswith("inserted"):
             inserted += 1
