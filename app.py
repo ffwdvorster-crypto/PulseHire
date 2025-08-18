@@ -13,12 +13,16 @@ from dateutil import parser as dtparse
 # ---- Version & Changelog (simple, code-based) ----
 VERSION = "1.0.0"
 
+# ---- Version & Changelog (simple, code-based) ----
+VERSION = "1.0.0"
+
 CHANGELOG = [
     # (version, date, summary, details)
     ("1.0.0", "2025-08-18", "Initial PSR Recruitment Portal",
      "Campaigns, Recruitment Drives, Candidates with de-dupe ingest, Candidate file view, DNC, Bulk Emails."),
     # Add new entries above this line as you update:
     # ("1.0.1", "YYYY-MM-DD", "Your short summary", "Your detailed description...")
+]
 
 st.set_page_config(page_title=f"PSR Recruitment Portal v{VERSION}", layout="wide")
 
