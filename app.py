@@ -135,7 +135,7 @@ def autodetect_columns(df: pd.DataFrame) -> Dict[str, str]:
         "notes": find_col(["Anything else you want to tell us?","Notes","Additional information"]),
     }
 
-def upsert_candidate(row: Dict[str, Any]):
+def upsert_candidate(row: Dict[str, Any], is_test: int = 0):
     now = datetime.utcnow().isoformat()
     email = (row.get("email") or "").strip()
     name = (row.get("name") or "").strip()
@@ -147,32 +147,41 @@ def upsert_candidate(row: Dict[str, Any]):
             hit = cur.fetchone()
             if hit:
                 cid = hit[0]
-                cur.execute("""
+ cur.execute("""
                     UPDATE candidates SET
                         name=?, phone=?, county=?, availability=?, source=?, completion_time=?, notes=?, campaign=?,
+                        is_test=CASE WHEN ?=1 THEN 1 ELSE COALESCE(is_test,0) END,
                         updated_at=?
                     WHERE id=?
                 """, (name, phone, row.get("county"), row.get("availability"), row.get("source"),
-                      row.get("completion_time"), row.get("notes"), row.get("campaign"), now, cid))
+                      row.get("completion_time"), row.get("notes"), row.get("campaign"),
+                      int(is_test), now, cid))
                 return cid, "updated(email)"
         if name and phone:
             cur.execute("SELECT id FROM candidates WHERE LOWER(name)=LOWER(?) AND phone=?", (name, phone))
             hit = cur.fetchone()
             if hit:
                 cid = hit[0]
-                cur.execute("""
+                   cur.execute("""
                     UPDATE candidates SET
                         email=?, county=?, availability=?, source=?, completion_time=?, notes=?, campaign=?,
+                        is_test=CASE WHEN ?=1 THEN 1 ELSE COALESCE(is_test,0) END,
                         updated_at=?
                     WHERE id=?
                 """, (email, row.get("county"), row.get("availability"), row.get("source"),
-                      row.get("completion_time"), row.get("notes"), row.get("campaign"), now, cid))
+                      row.get("completion_time"), row.get("notes"), row.get("campaign"),
+                      int(is_test), now, cid))
                 return cid, "updated(name+phone)"
-        cur.execute("""
-            INSERT INTO candidates (email, name, phone, county, availability, source, completion_time, notes, status, last_attempt, interview_dt, campaign, created_at, updated_at, dnc)
-            VALUES (?,?,?,?,?,?,?,?, 'New','', '', ?, ?, ?, 0)
+              cur.execute("""
+            INSERT INTO candidates (
+                email, name, phone, county, availability, source, completion_time, notes,
+                status, last_attempt, interview_dt, campaign,
+                created_at, updated_at, dnc, is_test
+            )
+            VALUES (?,?,?,?,?,?,?,?, 'New','', '', ?, ?, ?, 0, ?)
         """, (email, name, phone, row.get("county"), row.get("availability"), row.get("source"),
-              row.get("completion_time"), row.get("notes"), row.get("campaign"), now, now))
+              row.get("completion_time"), row.get("notes"), row.get("campaign"), now, now, int(is_test)))
+
         return cur.lastrowid, "inserted"
 
 def update_candidate_fields(row_id: int, fields: Dict[str, Any]):
