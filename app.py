@@ -104,6 +104,12 @@ def db_init():
             FOREIGN KEY(candidate_id) REFERENCES candidates(id)
         )""")
 
+# --- Migration: add is_test flag to candidates (safe to run repeatedly)
+        try:
+            con.execute("ALTER TABLE candidates ADD COLUMN is_test INTEGER DEFAULT 0")
+        except Exception:
+            pass
+            
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", str(s).strip().lower()) if s is not None else ""
 
@@ -357,6 +363,7 @@ elif page == "Candidates":
             try:
                 up_df = pd.read_excel(up_file)
                 st.success(f"Loaded {len(up_df)} rows.")
+                  mark_as_test = st.checkbox("Mark this upload as test data")
                 detected = autodetect_columns(up_df)
                 st.write("Column mapping:")
                 field_map = {}
@@ -370,7 +377,7 @@ elif page == "Candidates":
                         field_map[key] = None
                 campaign_name = st.text_input("Apply to campaign (optional)", value="")
                 if st.button("Ingest & De-duplicate"):
-                    res = ingest_forms(up_df, field_map, campaign_name)
+                    res = ingest_forms(up_df, field_map, campaign_name, is_test=int(mark_as_test))
                     st.success(f"Ingested {res['rows_seen']} rows | Inserted {res['inserted']} | Updated {res['updated']}")
             except Exception as e:
                 st.error(f"Error reading Excel: {e}")
