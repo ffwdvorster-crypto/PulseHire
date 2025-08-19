@@ -3,21 +3,22 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, date
-from typing import Dict, Any, List, Set, Optional
+from typing import Dict, Any, List, Set, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparse
 
 # ---- Version & Changelog ----
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CHANGELOG = [
+    ("1.2.0", "2025-08-19", "Active recruitment + candidate UX",
+     "Renames 'Recruitment Drives' to 'Active recruitment' with start date and auto cutoff (7 workdays prior). "
+     "Candidate picker sorted alphabetically. Candidate file shows Notice period and Leave from the form."),
     ("1.1.0", "2025-08-18", "Hiring areas + auto DNC by county",
-     "Adds Blocked Counties settings page; auto-flags DNC (reason: outside of hiring area) on ingest; "
-     "Apply-to-existing button; Candidate File shows DNC reason and override switch; Do Not Call page can restore. "
-     "Also adds safe string handling to avoid 'int has no attribute strip' errors."),
+     "Blocked Counties settings; auto-DNC on ingest; DNC reason/override; test upload flag; safe string handling."),
     ("1.0.0", "2025-08-18", "Initial PSR Recruitment Portal",
-     "Campaigns, Recruitment Drives, Candidates with de-dupe ingest, Candidate file view, DNC, Bulk Emails."),
+     "Campaigns, Candidates with de-dupe ingest, Candidate file, DNC, Bulk Emails."),
 ]
 st.set_page_config(page_title=f"PSR Recruitment Portal v{VERSION}", layout="wide")
 
@@ -26,10 +27,10 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 STATUSES = ["New","Called","No Answer","Voicemail","Interviewed","Rejected","Hired","DNC"]
+DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 
 # ------------ Helpers ------------
 def sstrip(x) -> str:
-    """Safe string strip: handles None/NaN/ints/dates cleanly."""
     if x is None:
         return ""
     try:
@@ -41,6 +42,16 @@ def sstrip(x) -> str:
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", sstrip(s).lower()) if s is not None else ""
+
+def subtract_workdays(d: date, n: int) -> date:
+    """Subtract n Mon–Fri workdays from date d."""
+    days = 0
+    cur = d
+    while days < n:
+        cur = cur - timedelta(days=1)
+        if cur.weekday() < 5:  # 0=Mon ... 4=Fri
+            days += 1
+    return cur
 
 # ------------ DB ------------
 def db_conn():
@@ -61,16 +72,15 @@ def db_init():
             created_at TEXT,
             updated_at TEXT
         )""")
+        # Per-day hours table (from earlier tweak)
         con.execute("""
-        CREATE TABLE IF NOT EXISTS drives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE IF NOT EXISTS campaign_hours (
             campaign_id INTEGER,
-            start_date TEXT,
-            cutoff_date TEXT,
-            fte_target INTEGER,
-            notes TEXT,
-            created_at TEXT,
-            updated_at TEXT,
+            dow INTEGER,
+            enabled INTEGER DEFAULT 0,
+            start_time TEXT,
+            end_time TEXT,
+            PRIMARY KEY (campaign_id, dow),
             FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
         )""")
         con.execute("""
@@ -90,7 +100,10 @@ def db_init():
             campaign TEXT,
             created_at TEXT,
             updated_at TEXT,
-            dnc INTEGER DEFAULT 0
+            dnc INTEGER DEFAULT 0,
+            -- new fields:
+            notice_period TEXT,
+            planned_leave TEXT
         )""")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_candidates_email ON candidates (LOWER(email))")
         con.execute("CREATE INDEX IF NOT EXISTS idx_candidates_name_phone ON candidates (LOWER(name), phone)")
@@ -119,28 +132,87 @@ def db_init():
         CREATE TABLE IF NOT EXISTS blocked_counties (
             county TEXT PRIMARY KEY
         )""")
+        # NEW: Active recruitment (current hiring selections)
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS active_recruitment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id INTEGER,
+            start_date TEXT,
+            cutoff_date TEXT,
+            notes TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
+        )""")
         # --- Migrations (safe each start)
-        try:
-            con.execute("ALTER TABLE candidates ADD COLUMN is_test INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        try:
-            con.execute("ALTER TABLE candidates ADD COLUMN dnc_reason TEXT")
-        except Exception:
-            pass
-        try:
-            con.execute("ALTER TABLE candidates ADD COLUMN dnc_override INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        # Seed initial blocked counties if empty
+        try: con.execute("ALTER TABLE candidates ADD COLUMN is_test INTEGER DEFAULT 0")
+        except Exception: pass
+        try: con.execute("ALTER TABLE candidates ADD COLUMN dnc_reason TEXT")
+        except Exception: pass
+        try: con.execute("ALTER TABLE candidates ADD COLUMN dnc_override INTEGER DEFAULT 0")
+        except Exception: pass
+        # Seed blocked counties if empty
         cur = con.cursor()
         cur.execute("SELECT COUNT(*) FROM blocked_counties")
         if cur.fetchone()[0] == 0:
-            initial = [
-                "Cavan","Cork","Galway","Leitrim","Donegal","Longford",
-                "Louth","Monaghan","Mayo","Roscommon","Sligo","Dublin"
-            ]
+            initial = ["Cavan","Cork","Galway","Leitrim","Donegal","Longford","Louth","Monaghan","Mayo","Roscommon","Sligo","Dublin"]
             cur.executemany("INSERT OR IGNORE INTO blocked_counties(county) VALUES (?)", [(c,) for c in initial])
+
+# ------------ Campaign helpers ------------
+def add_campaign(name: str, hours: str, req_text: str, need_wknd: bool, need_eve: bool, need_wkd: bool, remote_ok: bool):
+    now = datetime.utcnow().isoformat()
+    with db_conn() as con:
+        con.execute("""
+        INSERT OR IGNORE INTO campaigns (name, hours, requirements_text, req_need_weekends, req_need_evenings, req_need_weekdays, req_remote_ok, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """, (name, hours, req_text, int(need_wknd), int(need_eve), int(need_wkd), int(remote_ok), now, now))
+        con.execute("""
+        UPDATE campaigns SET hours=?, requirements_text=?, req_need_weekends=?, req_need_evenings=?, req_need_weekdays=?, req_remote_ok=?, updated_at=?
+        WHERE name=?
+        """, (hours, req_text, int(need_wknd), int(need_eve), int(need_wkd), int(remote_ok), now, name))
+
+def list_campaigns():
+    with db_conn() as con:
+        return pd.read_sql_query("SELECT id, name, hours, requirements_text, req_need_weekends, req_need_evenings, req_need_weekdays, req_remote_ok FROM campaigns ORDER BY name", con)
+
+def get_campaign_id_by_name(name: str) -> Optional[int]:
+    name = (name or "").strip()
+    if not name:
+        return None
+    with db_conn() as con:
+        row = con.execute("SELECT id FROM campaigns WHERE name=?", (name,)).fetchone()
+        return row[0] if row else None
+
+# Per-day hours helpers (kept from prior change)
+def get_campaign_hours(campaign_id: int) -> List[dict]:
+    with db_conn() as con:
+        rows = con.execute(
+            "SELECT dow, enabled, start_time, end_time FROM campaign_hours WHERE campaign_id=? ORDER BY dow",
+            (campaign_id,)
+        ).fetchall()
+    existing = {r[0]: {"enabled": r[1], "start_time": r[2], "end_time": r[3]} for r in rows}
+    out = []
+    for d in range(7):
+        out.append({
+            "dow": d,
+            "enabled": existing.get(d, {}).get("enabled", 0),
+            "start_time": existing.get(d, {}).get("start_time", "09:00"),
+            "end_time": existing.get(d, {}).get("end_time", "17:00"),
+        })
+    return out
+
+def set_campaign_hours(campaign_id: int, hours: List[dict]):
+    with db_conn() as con:
+        for row in hours:
+            con.execute("""
+            INSERT INTO campaign_hours (campaign_id, dow, enabled, start_time, end_time)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(campaign_id, dow) DO UPDATE SET
+                enabled=excluded.enabled,
+                start_time=excluded.start_time,
+                end_time=excluded.end_time
+            """, (campaign_id, int(row["dow"]), int(row["enabled"]), row["start_time"], row["end_time"]))
 
 # ------------ Blocked counties helpers ------------
 def get_blocked_counties() -> List[str]:
@@ -170,6 +242,30 @@ def apply_blocked_counties_to_candidates() -> int:
         cur.execute(sql, blocked)
         return cur.rowcount
 
+# ------------ Active recruitment helpers ------------
+def add_active_recruitment(campaign_id: int, start: date, cutoff: Optional[date], notes: str):
+    now = datetime.utcnow().isoformat()
+    cutoff_str = str(cutoff) if cutoff else None
+    with db_conn() as con:
+        con.execute("""
+        INSERT INTO active_recruitment (campaign_id, start_date, cutoff_date, notes, is_active, created_at, updated_at)
+        VALUES (?,?,?,?, 1, ?, ?)
+        """, (campaign_id, str(start), cutoff_str, notes, now, now))
+
+def list_active_recruitment(include_inactive: bool=False):
+    sql = """SELECT ar.id, c.name AS campaign, ar.start_date, ar.cutoff_date, ar.notes, ar.is_active
+             FROM active_recruitment ar JOIN campaigns c ON c.id=ar.campaign_id"""
+    if not include_inactive:
+        sql += " WHERE ar.is_active=1"
+    sql += " ORDER BY ar.start_date DESC"
+    with db_conn() as con:
+        return pd.read_sql_query(sql, con)
+
+def set_active_recruitment_status(ar_id: int, active: bool):
+    with db_conn() as con:
+        con.execute("UPDATE active_recruitment SET is_active=?, updated_at=? WHERE id=?",
+                    (1 if active else 0, datetime.utcnow().isoformat(), ar_id))
+
 # ------------ Column autodetect ------------
 def autodetect_columns(df: pd.DataFrame) -> Dict[str, str]:
     norm_cols = {_norm(c): c for c in df.columns}
@@ -191,6 +287,9 @@ def autodetect_columns(df: pd.DataFrame) -> Dict[str, str]:
         "completion_time": find_col(["Completion time","Submitted at","Timestamp"]),
         "source": find_col(["Where did you see the job advertisement?","Source","Job board"]),
         "notes": find_col(["Anything else you want to tell us?","Notes","Additional information"]),
+        # NEW:
+        "notice_period": find_col(["Notice period","What is your notice period","Do you have a notice period"]),
+        "planned_leave": find_col(["Leave","Planned leave","Upcoming leave","Holidays","Annual leave"]),
     }
 
 # ------------ Candidate data helpers ------------
@@ -200,6 +299,13 @@ def upsert_candidate(row: Dict[str, Any], is_test: int = 0):
     name   = sstrip(row.get("name"))
     phone  = sstrip(row.get("phone"))
     county = sstrip(row.get("county"))
+    availability = sstrip(row.get("availability"))
+    source = sstrip(row.get("source"))
+    completion_time = sstrip(row.get("completion_time"))
+    notes = sstrip(row.get("notes"))
+    campaign = sstrip(row.get("campaign"))
+    notice_period = sstrip(row.get("notice_period"))
+    planned_leave = sstrip(row.get("planned_leave"))
 
     blocked = [c.lower() for c in get_blocked_counties()]
     is_blocked = county.lower() in blocked if county else False
@@ -219,12 +325,13 @@ def upsert_candidate(row: Dict[str, Any], is_test: int = 0):
                 cur.execute(f"""
                     UPDATE candidates SET
                         name=?, phone=?, county=?, availability=?, source=?, completion_time=?, notes=?, campaign=?,
+                        notice_period=?, planned_leave=?,
                         is_test=CASE WHEN ?=1 THEN 1 ELSE COALESCE(is_test,0) END
                         {auto_cols},
                         updated_at=?
                     WHERE id=?
-                """, (name, phone, county, sstrip(row.get("availability")), sstrip(row.get("source")),
-                      sstrip(row.get("completion_time")), sstrip(row.get("notes")), sstrip(row.get("campaign")),
+                """, (name, phone, county, availability, source, completion_time, notes, campaign,
+                      notice_period, planned_leave,
                       int(is_test), *auto_vals, now, cid))
                 return cid, "updated(email)"
         if name and phone:
@@ -240,12 +347,13 @@ def upsert_candidate(row: Dict[str, Any], is_test: int = 0):
                 cur.execute(f"""
                     UPDATE candidates SET
                         email=?, county=?, availability=?, source=?, completion_time=?, notes=?, campaign=?,
+                        notice_period=?, planned_leave=?,
                         is_test=CASE WHEN ?=1 THEN 1 ELSE COALESCE(is_test,0) END
                         {auto_cols},
                         updated_at=?
                     WHERE id=?
-                """, (email, county, sstrip(row.get("availability")), sstrip(row.get("source")),
-                      sstrip(row.get("completion_time")), sstrip(row.get("notes")), sstrip(row.get("campaign")),
+                """, (email, county, availability, source, completion_time, notes, campaign,
+                      notice_period, planned_leave,
                       int(is_test), *auto_vals, now, cid))
                 return cid, "updated(name+phone)"
         # Insert new
@@ -255,12 +363,12 @@ def upsert_candidate(row: Dict[str, Any], is_test: int = 0):
             INSERT INTO candidates (
                 email, name, phone, county, availability, source, completion_time, notes,
                 status, last_attempt, interview_dt, campaign,
-                created_at, updated_at, dnc, is_test, dnc_reason, dnc_override
+                created_at, updated_at, dnc, is_test, dnc_reason, dnc_override,
+                notice_period, planned_leave
             )
-            VALUES (?,?,?,?,?,?,?,?, 'New','', '', ?, ?, ?, ?, ?, ?, 0)
-        """, (email, name, phone, county, sstrip(row.get("availability")), sstrip(row.get("source")),
-              sstrip(row.get("completion_time")), sstrip(row.get("notes")), sstrip(row.get("campaign")),
-              now, now, dnc_val, int(is_test), dnc_reason))
+            VALUES (?,?,?,?,?,?,?,?, 'New','', '', ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        """, (email, name, phone, county, availability, source, completion_time, notes,
+              campaign, now, now, dnc_val, int(is_test), dnc_reason, notice_period, planned_leave))
         return cur.lastrowid, "inserted"
 
 def update_candidate_fields(row_id: int, fields: Dict[str, Any]):
@@ -322,41 +430,7 @@ def add_attachment(cid: int, file_name: str, file_bytes: bytes):
         con.execute("INSERT INTO attachments (candidate_id, filename, path, uploaded_at) VALUES (?,?,?,?)",
                     (cid, file_name, path, datetime.utcnow().isoformat()))
 
-def add_campaign(name: str, hours: str, req_text: str, need_wknd: bool, need_eve: bool, need_wkd: bool, remote_ok: bool):
-    now = datetime.utcnow().isoformat()
-    with db_conn() as con:
-        con.execute("""
-        INSERT OR IGNORE INTO campaigns (name, hours, requirements_text, req_need_weekends, req_need_evenings, req_need_weekdays, req_remote_ok, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?)
-        """, (name, hours, req_text, int(need_wknd), int(need_eve), int(need_wkd), int(remote_ok), now, now))
-        con.execute("""
-        UPDATE campaigns SET hours=?, requirements_text=?, req_need_weekends=?, req_need_evenings=?, req_need_weekdays=?, req_remote_ok=?, updated_at=?
-        WHERE name=?
-        """, (hours, req_text, int(need_wknd), int(need_eve), int(need_wkd), int(remote_ok), now, name))
-
-def list_campaigns():
-    with db_conn() as con:
-        return pd.read_sql_query("SELECT id, name, hours, requirements_text, req_need_weekends, req_need_evenings, req_need_weekdays, req_remote_ok FROM campaigns ORDER BY name", con)
-
-def add_drive(campaign_id: int, start_date: date, cutoff_date: date, fte_target: int, notes: str):
-    now = datetime.utcnow().isoformat()
-    with db_conn() as con:
-        con.execute("""
-        INSERT INTO drives (campaign_id, start_date, cutoff_date, fte_target, notes, created_at, updated_at)
-        VALUES (?,?,?,?,?, ?, ?)
-        """, (campaign_id, str(start_date), str(cutoff_date), int(fte_target), notes, now, now))
-
-def list_drives(campaign_id: Optional[int]=None):
-    sql = """SELECT d.id, c.name as campaign, d.start_date, d.cutoff_date, d.fte_target, d.notes
-             FROM drives d JOIN campaigns c ON c.id=d.campaign_id"""
-    params = []
-    if campaign_id:
-        sql += " WHERE d.campaign_id=?"
-        params.append(campaign_id)
-    sql += " ORDER BY d.start_date DESC"
-    with db_conn() as con:
-        return pd.read_sql_query(sql, con, params=params)
-
+# ------------ Ingest ------------
 def ingest_forms(up_df: pd.DataFrame, field_map: Dict[str,str], campaign_name: str, is_test: int = 0) -> Dict[str,int]:
     detected = 0
     inserted = 0
@@ -372,6 +446,8 @@ def ingest_forms(up_df: pd.DataFrame, field_map: Dict[str,str], campaign_name: s
             "completion_time": sstrip(r.get(field_map.get("completion_time"))  if field_map.get("completion_time")  else ""),
             "notes":           sstrip(r.get(field_map.get("notes"))            if field_map.get("notes")            else ""),
             "campaign":        sstrip(campaign_name),
+            "notice_period":   sstrip(r.get(field_map.get("notice_period"))    if field_map.get("notice_period")    else ""),
+            "planned_leave":   sstrip(r.get(field_map.get("planned_leave"))    if field_map.get("planned_leave")    else ""),
         }
         _, action = upsert_candidate(row, is_test=is_test)
         detected += 1
@@ -388,7 +464,7 @@ db_init()
 st.sidebar.title("PSR Portal")
 page = st.sidebar.radio(
     "Go to",
-    ["Dashboard","Campaigns","Recruitment Drives","Candidates","Do Not Call","Hiring Areas","Changelog"]
+    ["Dashboard","Campaigns","Active recruitment","Candidates","Do Not Call","Hiring Areas","Changelog"]
 )
 
 # ------------ Pages ------------
@@ -410,40 +486,123 @@ if page == "Dashboard":
 
 elif page == "Campaigns":
     st.title("Campaigns")
-    st.write("Create or update campaigns once, then reuse them for drives.")
+    st.write("Create or update campaigns once, then set weekly operating hours.")
+
     with st.form("campaign_form", clear_on_submit=False):
         name = st.text_input("Campaign name *")
-        hours = st.text_area("Hours of operation")
+        hours = st.text_area("Hours of operation (free text / notes)")
         req_text = st.text_area("Requirements (free text)")
         cols = st.columns(4)
         need_wknd = cols[0].checkbox("Requires weekends")
-        need_eve = cols[1].checkbox("Requires evenings")
-        need_wkd = cols[2].checkbox("Requires weekdays")
+        need_eve  = cols[1].checkbox("Requires evenings")
+        need_wkd  = cols[2].checkbox("Requires weekdays")
         remote_ok = cols[3].checkbox("Remote acceptable", value=True)
         submit = st.form_submit_button("Save campaign")
         if submit and name.strip():
             add_campaign(name.strip(), hours, req_text, need_wknd, need_eve, need_wkd, remote_ok)
             st.success("Campaign saved.")
-    st.subheader("Existing campaigns")
-    st.dataframe(list_campaigns(), use_container_width=True)
 
-elif page == "Recruitment Drives":
-    st.title("Recruitment Drives")
+    st.subheader("Existing campaigns")
+    camps = list_campaigns()
+    st.dataframe(camps, use_container_width=True)
+
+    # Weekly hours editor (from earlier)
+    st.subheader("Weekly Hours")
+    if camps.empty:
+        st.info("Create a campaign above to configure hours.")
+    else:
+        camp_names = camps["name"].tolist()
+        chosen = st.selectbox("Select campaign", camp_names, key="campaign_hours_select")
+        camp_id = get_campaign_id_by_name(chosen)
+        day_rows = get_campaign_hours(camp_id)
+
+        st.caption("Tick the days that operate. You can set the same hours for all selected days, or customize per day.")
+        same_all = st.checkbox("Use the same hours for all selected days", value=True)
+
+        day_enabled = []
+        col1, col2 = st.columns(2)
+        for i, day in enumerate(DAYS):
+            with (col1 if i < 4 else col2):
+                default = bool(day_rows[i]["enabled"])
+                day_enabled.append(st.checkbox(day, value=default, key=f"campday_{i}"))
+
+        from datetime import time
+        def parse_hhmm(s):
+            try:
+                hh, mm = s.split(":")
+                return time(int(hh), int(mm))
+            except Exception:
+                return time(9, 0)
+
+        if same_all:
+            any_idx = next((i for i, r in enumerate(day_rows) if r["enabled"]), 0)
+            def_start = parse_hhmm(day_rows[any_idx]["start_time"])
+            def_end   = parse_hhmm(day_rows[any_idx]["end_time"])
+            c3, c4 = st.columns(2)
+            start_all = c3.time_input("Start time", value=def_start, key="all_start")
+            end_all   = c4.time_input("End time",   value=def_end,   key="all_end")
+        else:
+            per_day_times = []
+            for i, day in enumerate(DAYS):
+                if day_enabled[i]:
+                    st.markdown(f"**{day}**")
+                    c3, c4 = st.columns(2)
+                    start_def = parse_hhmm(day_rows[i]["start_time"])
+                    end_def   = parse_hhmm(day_rows[i]["end_time"])
+                    per_start = c3.time_input(f"{day} start", value=start_def, key=f"start_{i}")
+                    per_end   = c4.time_input(f"{day} end",   value=end_def,   key=f"end_{i}")
+                    per_day_times.append((i, per_start, per_end))
+                else:
+                    per_day_times.append((i, None, None))
+
+        if st.button("Save weekly hours"):
+            to_save = []
+            for i in range(7):
+                enabled = 1 if day_enabled[i] else 0
+                if same_all and enabled:
+                    stt = f"{start_all.hour:02d}:{start_all.minute:02d}"
+                    ett = f"{end_all.hour:02d}:{end_all.minute:02d}"
+                elif not same_all and enabled:
+                    for (dix, ps, pe) in per_day_times:
+                        if dix == i and ps is not None and pe is not None:
+                            stt = f"{ps.hour:02d}:{ps.minute:02d}"
+                            ett = f"{pe.hour:02d}:{pe.minute:02d}"
+                            break
+                    else:
+                        stt, ett = "09:00", "17:00"
+                else:
+                    stt, ett = "09:00", "17:00"
+                to_save.append({"dow": i, "enabled": enabled, "start_time": stt, "end_time": ett})
+            set_campaign_hours(camp_id, to_save)
+            st.success("Weekly hours saved.")
+
+elif page == "Active recruitment":
+    st.title("Active recruitment")
+    st.caption("Select campaigns currently hiring, set start dates; cutoff is auto-calculated 7 working days before the start (you can override).")
+
     camps = list_campaigns()
     if camps.empty:
         st.info("Create a campaign first in the Campaigns tab.")
     else:
-        camp_names = dict(zip(camps["name"], camps["id"]))
-        chosen = st.selectbox("Campaign", list(camp_names.keys()))
+        names_to_ids = dict(zip(camps["name"], camps["id"]))
+        chosen = st.selectbox("Campaign", list(names_to_ids.keys()), key="active_campaign_select")
         start = st.date_input("Start date", value=date.today())
-        cutoff = st.date_input("Cutoff date", value=date.today())
-        fte = st.number_input("FTE target", min_value=0, step=1, value=0)
+        auto_cutoff = subtract_workdays(start, 7)
+        cutoff = st.date_input("Cutoff date (auto 7 working days before start)", value=auto_cutoff)
         notes = st.text_area("Notes (optional)")
-        if st.button("Add drive"):
-            add_drive(camp_names[chosen], start, cutoff, fte, notes)
-            st.success("Drive added.")
-        st.subheader("Recent drives for this campaign")
-        st.dataframe(list_drives(camp_names[chosen]), use_container_width=True)
+        if st.button("Add to Active recruitment"):
+            add_active_recruitment(names_to_ids[chosen], start, cutoff, notes)
+            st.success("Added to Active recruitment.")
+
+    st.subheader("Currently active")
+    active_df = list_active_recruitment(include_inactive=False)
+    st.dataframe(active_df, use_container_width=True)
+    if not active_df.empty:
+        ar_id = st.selectbox("Deactivate an entry (pick ID)", active_df["id"].tolist(), key="deact_select")
+        if st.button("Deactivate selected"):
+            set_active_recruitment_status(int(ar_id), False)
+            st.success("Deactivated.")
+            st.experimental_rerun()
 
 elif page == "Candidates":
     st.title("Candidates")
@@ -458,8 +617,11 @@ elif page == "Candidates":
                 detected = autodetect_columns(up_df)
                 st.write("Column mapping:")
                 field_map = {}
-                map_cols = [("candidate_name","Full name"),("email","Email"),("phone","Phone"),("county","County/Location"),
-                            ("availability","Availability"),("completion_time","Completion time"),("source","Source"),("notes","Notes")]
+                map_cols = [
+                    ("candidate_name","Full name"),("email","Email"),("phone","Phone"),("county","County/Location"),
+                    ("availability","Availability"),("completion_time","Completion time"),("source","Source"),("notes","Notes"),
+                    ("notice_period","Notice period"),("planned_leave","Leave")
+                ]
                 for key, label in map_cols:
                     options = ["-- none --"] + list(up_df.columns)
                     default = detected.get(key) if detected.get(key) in up_df.columns else "-- none --"
@@ -489,11 +651,19 @@ elif page == "Candidates":
     sep = st.radio("Delimiter", [", ", "; ", " "], horizontal=True, index=0)
     st.text_area("Copy-paste emails", value=sep.join(emails), height=100)
 
-    # Candidate file
+    # Candidate file (picker sorted alphabetically)
     st.subheader("Candidate File")
     if not df.empty:
-        cid = st.selectbox("Pick a candidate", df["id"].tolist(),
-                           format_func=lambda i: f"{df.loc[df['id']==i, 'name'].values[0]} — {df.loc[df['id']==i, 'email'].values[0]}")
+        # Build a (id, label) list sorted by lowercase name
+        choices: List[Tuple[int,str]] = []
+        for _, r in df.iterrows():
+            label = f"{sstrip(r['name'])} — {sstrip(r['email'])}"
+            choices.append((int(r["id"]), label))
+        choices.sort(key=lambda t: t[1].lower())
+        id_list = [c[0] for c in choices]
+        label_map = {c[0]: c[1] for c in choices}
+
+        cid = st.selectbox("Pick a candidate", id_list, format_func=lambda i: label_map.get(i, str(i)))
         with db_conn() as con:
             row = con.execute("SELECT * FROM candidates WHERE id=?", (cid,)).fetchone()
             cols = [c[1] for c in con.execute("PRAGMA table_info(candidates)").fetchall()]
@@ -504,7 +674,10 @@ elif page == "Candidates":
             st.write(f"**Email:** {cand.get('email','')}")
             st.write(f"**Phone:** {cand.get('phone','')}")
             st.write(f"**County:** {cand.get('county','')}")
+            # Availability + NEW fields
             st.write(f"**Availability:** {cand.get('availability','')}")
+            st.write(f"**Notice period:** {cand.get('notice_period','')}")
+            st.write(f"**Leave:** {cand.get('planned_leave','')}")
             st.write(f"**Source:** {cand.get('source','')}")
             new_status = st.selectbox("Status", STATUSES, index=STATUSES.index(cand.get("status","New")) if cand.get("status","New") in STATUSES else 0)
             last_attempt = st.text_input("Last attempt", value=cand.get("last_attempt","") or "")
