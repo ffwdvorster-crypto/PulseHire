@@ -1,3 +1,4 @@
+
 import os
 import io
 import pandas as pd
@@ -30,31 +31,103 @@ else:
 db.init_db(seed=True, seed_keywords=scoring.DEFAULT_KEYWORDS, seed_admin=True)
 auth.ensure_seed_admin()
 
-# Sidebar logo
-with st.sidebar:
-    st.image(os.path.join("assets","logo.png"), use_column_width=False, width=240)  # ~2x
-    st.markdown("---")
+# --- Utilities ---
+def _exists_assets_file(*parts):
+    path = os.path.join("assets", *parts)
+    return os.path.exists(path), path
 
-# --- Session auth ---
-if "user" not in st.session_state:
-    st.session_state.user = None
+# --- Fancy-ish sidebar nav buttons (pure Streamlit + CSS) ---
+SIDEBAR_CSS = """
+<style>
+/* Sidebar button look */
+div[data-testid="stSidebar"] .sidebar-btn {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  margin: 6px 0;
+  background: #1f2630;
+  border: 1px solid #2a3340;
+  border-radius: 10px;
+  color: #e6f5ff;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  font-weight: 600;
+}
+div[data-testid="stSidebar"] .sidebar-btn:hover {
+  background: #26303c;
+  border-color: #334154;
+}
+div[data-testid="stSidebar"] .sidebar-btn.active {
+  background: #0e7490; /* teal-ish */
+  border-color: #0ea5b7;
+  color: white;
+}
+.sidebar-spacer { height: 8px; }
+.logo-wrap img { max-width: 240px; }
+</style>
+"""
+st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
 
-def login_ui():
-    st.title("🔐 PulseHire Login")
-    with st.form("login"):
-        email = st.text_input("Email", value="")
-        pw = st.text_input("Password", type="password", value="")
-        submitted = st.form_submit_button("Sign In")
-    if submitted:
-        u = auth.verify_user(email, pw)
-        if u:
-            st.session_state.user = u
-            st.rerun()
+NAV_ITEMS = [
+    ("📊 Dashboard", "dashboard"),
+    ("🎯 Campaigns", "campaigns"),
+    ("🚀 Active recruitment", "active"),
+    ("👥 Candidates", "candidates_upload"),
+    ("⛔ Do Not Call", "dnc"),
+    ("✨ Keywords", "scoring"),
+    ("🗺️ Hiring Areas", "counties"),
+    ("⚖️ Compliance", "compliance"),
+    ("🧾 Changelog", "changelog"),
+    ("🛠️ Admin", "admin"),
+    ("🔑 Account", "account"),
+]
+
+if "nav" not in st.session_state:
+    st.session_state.nav = "dashboard"
+
+def sidebar_nav():
+    with st.sidebar:
+        # Logo (optional – only if present)
+        has_logo, logo_path = _exists_assets_file("logo.png")
+        if has_logo:
+            st.image(logo_path, use_column_width=False, width=240)
         else:
-            st.error("Invalid email or password.")
+            st.markdown("### PulseHire")
 
-    with st.expander("Admin note"):
-        st.info("Seeded admin: **admin@pulsehire.local / admin123**")
+        st.markdown("---")
+        # Render "buttons"
+        for label, key in NAV_ITEMS:
+            is_active = st.session_state.nav == key
+            classes = "sidebar-btn active" if is_active else "sidebar-btn"
+            if st.button(label, key=f"nav-{key}", use_container_width=True):
+                st.session_state.nav = key
+                st.rerun()
+            # Hack: add class via markdown (visual only) – button can't be styled directly, so we emulate via spacing.
+            st.markdown(f'<div class="{classes}" style="display:none"></div>', unsafe_allow_html=True)
+        st.markdown("---")
+        if st.button("Log out", type="secondary", use_container_width=True):
+            st.session_state.user = None
+            st.rerun()
+
+# --- Pages ---
+def dashboard_ui():
+    st.title("PulseHire ATS")
+    st.subheader("📊 Dashboard")
+    # Simple KPIs
+    conn = db.get_connection()
+    cur = conn.cursor()
+    try:
+        total_candidates = cur.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        total_campaigns = cur.execute("SELECT COUNT(*) FROM campaigns").fetchone()[0]
+        total_tests = cur.execute("SELECT COUNT(*) FROM test_scores").fetchone()[0]
+    finally:
+        conn.close()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Candidates", total_candidates)
+    c2.metric("Campaigns", total_campaigns)
+    c3.metric("Assessments", total_tests)
+    st.caption("Tip: Use **Active recruitment** to list campaigns and attach quick notes, or jump to **Candidates** to ingest CSVs.")
 
 def account_ui():
     st.subheader("👤 Account")
@@ -85,10 +158,6 @@ def account_ui():
                     auth.create_user(e, p, role=r)
                     st.success(f"Created user {e}")
 
-    if st.button("Sign out", type="secondary"):
-        st.session_state.user = None
-        st.rerun()
-
 def campaigns_ui():
     st.subheader("🎯 Campaigns")
     st.caption("Manage campaigns, hours, keyword focus, and notes.")
@@ -105,9 +174,16 @@ def campaigns_ui():
                 db.add_campaign(name=name, hours=hours, keywords="; ".join(selected) if selected else None, notes=notes)
                 st.success("Campaign added.")
 
-    st.markdown("**Download CSV template**")
-    with open(os.path.join("assets","campaigns_template.csv"), "rb") as f:
-        st.download_button("Download campaigns_template.csv", f, file_name="campaigns_template.csv")
+    st.markdown("**Campaign CSV template**")
+    has_tpl, tpl_path = _exists_assets_file("campaigns_template.csv")
+    if has_tpl:
+        with open(tpl_path, "rb") as f:
+            st.download_button("Download campaigns_template.csv", f, file_name="campaigns_template.csv")
+    else:
+        st.info("No template file found in `assets/`. Click to generate one now.")
+        sample = "name,hours,keywords,notes\nTelehealth Nurse,Mon-Fri 09:00-17:00,\"Customer Service; CRM Software\",Urgent backfill\n"
+        st.download_button("Generate & download campaigns_template.csv", data=sample.encode("utf-8"),
+                           file_name="campaigns_template.csv", mime="text/csv")
 
     st.markdown("---")
     st.write("**Existing campaigns**")
@@ -118,7 +194,7 @@ def campaigns_ui():
         st.info("No campaigns yet.")
 
 def counties_ui():
-    st.subheader("🗺️ Counties")
+    st.subheader("🗺️ Hiring Areas (Counties)")
     st.caption("Add/remove Irish counties. Multi-add supports commas, semicolons, and new lines.")
 
     existing = db.list_counties()
@@ -185,7 +261,7 @@ def ingestion_ui():
                 st.success(f"Ingested {n} interview note rows.")
 
 def scoring_ui():
-    st.subheader("📊 Scoring")
+    st.subheader("✨ Keywords & Scoring")
     st.caption("Fuzzy match resume text against tiered keywords. Add new keywords and rescore.")
 
     # Keyword management
@@ -213,7 +289,7 @@ def scoring_ui():
     conn.close()
 
     if not rows:
-        st.info("No candidates. Upload some in 'Candidates Upload' or via 'Ingestion'.")
+        st.info("No candidates. Upload some in 'Candidates' or via 'Ingestion'.")
         return
 
     df = pd.DataFrame(rows)
@@ -232,45 +308,65 @@ def scoring_ui():
         st.dataframe(pd.DataFrame(results).sort_values("score", ascending=False))
 
 def compliance_ui():
-    st.subheader("📜 Compliance")
+    st.subheader("⚖️ Compliance")
     st.info("Placeholder — you can implement your checks here.")
 
 def changelog_ui():
     st.subheader("🧾 Changelog")
     st.info("Placeholder — document your changes here.")
 
-# --- Navigation ---
+def login_ui():
+    st.title("🔐 PulseHire Login")
+    with st.form("login"):
+        email = st.text_input("Email", value="")
+        pw = st.text_input("Password", type="password", value="")
+        submitted = st.form_submit_button("Sign In")
+    if submitted:
+        u = auth.verify_user(email, pw)
+        if u:
+            st.session_state.user = u
+            st.rerun()
+        else:
+            st.error("Invalid email or password.")
+    with st.expander("Admin note"):
+        st.info("Seeded admin: **admin@pulsehire.local / admin123**")
+
+# --- Auth gate ---
+if "user" not in st.session_state:
+    st.session_state.user = None
+
 if st.session_state.user is None:
     login_ui()
     st.stop()
 
-with st.sidebar:
-    section = st.radio("Navigate", [
-        "🎯 Campaigns",
-        "🗺️ Counties",
-        "👥 Candidates Upload",
-        "📥 Ingestion",
-        "📊 Scoring",
-        "📜 Compliance",
-        "🧾 Changelog",
-        "👤 Account",
-    ], label_visibility="collapsed")
+# --- Sidebar + router ---
+sidebar_nav()
 
-st.title("PulseHire ATS")
-
-if section == "🎯 Campaigns":
+# Route to the page
+page = st.session_state.nav
+if page == "dashboard":
+    dashboard_ui()
+elif page == "campaigns":
     campaigns_ui()
-elif section == "🗺️ Counties":
-    counties_ui()
-elif section == "👥 Candidates Upload":
+elif page == "active":
+    # Simple view aliasing to campaigns for now
+    campaigns_ui()
+elif page == "candidates_upload":
     candidates_upload_ui()
-elif section == "📥 Ingestion":
-    ingestion_ui()
-elif section == "📊 Scoring":
+elif page == "dnc":
+    st.subheader("⛔ Do Not Call")
+    st.info("Placeholder — add DNC list management here.")
+elif page == "scoring":
     scoring_ui()
-elif section == "📜 Compliance":
+elif page == "counties":
+    counties_ui()
+elif page == "compliance":
     compliance_ui()
-elif section == "🧾 Changelog":
+elif page == "changelog":
     changelog_ui()
-elif section == "👤 Account":
+elif page == "admin":
+    st.subheader("🛠️ Admin")
+    st.caption("Admin actions are available in the Account page below.")
+    st.info("Use **Account → Create user** to add users and **Change password** to rotate credentials.")
+elif page == "account":
     account_ui()
