@@ -1,37 +1,62 @@
-import os
+from auth import verify_password, create_user, users_exist, seed_admin_if_empty, set_password
+from db import init_db
 import streamlit as st
-from auth import login_screen, get_current_user, sign_out_button
-from db import init_db, seed_admin_if_empty
-from theme import apply_theme, BRAND
 
-# --- Init DB and seed default admin
+# init + seed
 init_db()
 seed_admin_if_empty()
 
-# --- Theme
-apply_theme()
+RESET_KEY = "PULSEHIRE_RESET"  # temporary guard for emergency reset
 
-# --- Header with logo + title + user
-col1, col2, col3 = st.columns([0.15, 0.55, 0.30])
-with col1:
-    if os.path.exists(BRAND["logo_path"]):
-        st.image(BRAND["logo_path"], width=120)
-with col2:
-    st.markdown(f"<h1 style='margin-bottom:0'>{BRAND['name']}</h1>", unsafe_allow_html=True)
-with col3:
-    user = get_current_user()
-    if user:
-        st.write(f"**{user['name']}** · {user['role'].title()}")
-        sign_out_button()
+def first_admin_setup_ui():
+    st.markdown("### First-time setup — create Admin")
+    with st.form("first_admin"):
+        email = st.text_input("Admin email", value="admin@pulsehire.local")
+        name  = st.text_input("Name", value="Admin")
+        pw1   = st.text_input("Password", type="password")
+        pw2   = st.text_input("Confirm password", type="password")
+        submit = st.form_submit_button("Create Admin", type="primary")
+    if submit:
+        if not email or not pw1:
+            st.error("Email and password required.")
+            return
+        if pw1 != pw2:
+            st.error("Passwords do not match.")
+            return
+        create_user(email, name or "Admin", "admin", pw1)
+        st.success("Admin created. Please log in.")
+        st.rerun()
 
-st.divider()
+def login_ui():
+    st.markdown("### Login")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    if st.button("Sign in", type="primary", use_container_width=True):
+        user = verify_password(email, password)
+        if user:
+            st.session_state["user"] = user.__dict__
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
 
-# --- Auth / Routing
-user = get_current_user()
-if not user:
-    login_screen()
+    with st.expander("Troubleshoot"):
+        st.caption("If default seeding failed or you forgot the admin password:")
+        k = st.text_input("Reset key")
+        new_pw = st.text_input("New admin password", type="password")
+        if st.button("Reset admin password") and k == RESET_KEY and new_pw:
+            updated = set_password("admin@pulsehire.local", new_pw)
+            if updated:
+                st.success("Admin password reset. Log in with the new password.")
+            else:
+                st.info("Admin user not found — create first admin below.")
+        st.caption("Or create the first Admin if there are no users:")
+
+        if not users_exist():
+            first_admin_setup_ui()
+
+# on load:
+if "user" not in st.session_state:
+    login_ui()
 else:
-    st.success(f"Welcome {user['name']}! You are logged in as **{user['role']}**.")
-    st.write("📋 Main navigation coming next (Candidates, Campaigns, Keywords, etc).")
-    st.info("This is the minimal starter so you can deploy immediately.")
-
+    # ... your normal app
+    pass
