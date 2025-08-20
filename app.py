@@ -1,8 +1,13 @@
-# Mini ATS – Pretty + Functional + Editable (Fault-tolerant imports)
-# - Handles missing PyPDF2 / python-docx gracefully with UI warnings
-# - Everything else unchanged
+# Mini ATS – Pretty + Functional + Editable (fault-tolerant)
+# - Upload multiple CVs (PDF/DOCX/TXT)
+# - Editable keyword groups + weights in sidebar
+# - Tiered labels (Strong / Potential / Low)
+# - Caution flag for multiple short tenures (< X months)
+# - Best-effort contact extraction (name/email/phone)
+# - Keyword highlight in preview
+# - CSV export + Config JSON download/upload
+# - Optional parsers: runs even if PyPDF2 / python-docx are missing
 
-import io
 import re
 import json
 from datetime import datetime
@@ -12,29 +17,26 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import streamlit as st
 
-# ---- Optional imports (PDF/DOCX). If unavailable, we degrade gracefully -------
-missing_modules = []
-
+# ── Optional parsers (graceful fallback if not installed) ──────────────────────
+MISSING_MODULES = []
 try:
     from PyPDF2 import PdfReader
 except Exception:
     PdfReader = None
-    missing_modules.append("PyPDF2")
-
+    MISSING_MODULES.append("PyPDF2")
 try:
     import docx  # python-docx
 except Exception:
     docx = None
-    missing_modules.append("python-docx")
+    MISSING_MODULES.append("python-docx")
 
-# ---- Page config --------------------------------------------------------------
+# ── Page config & light CSS ────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Mini ATS (Pretty + Functional)",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ---- Minimal theming / CSS ----------------------------------------------------
 STYLES = """
 <style>
 :root { --bg:#0b1016; --card:#111827; --muted:#94a3b8; --accent:#22d3ee; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444; }
@@ -54,7 +56,13 @@ STYLES = """
 """
 st.markdown(STYLES, unsafe_allow_html=True)
 
-# ---- Defaults -----------------------------------------------------------------
+if MISSING_MODULES:
+    st.warning(
+        "Optional parsers missing: " + ", ".join(MISSING_MODULES) +
+        ". PDF/DOCX files will be skipped until installed (see requirements.txt)."
+    )
+
+# ── Defaults (fully editable in UI) ────────────────────────────────────────────
 DEFAULT_CONFIG = {
     "categories": {
         "Core Skills": [
@@ -89,20 +97,12 @@ def save_config(cfg):
 
 cfg = load_config()
 
-# ---- Sidebar ------------------------------------------------------------------
+# ── Sidebar controls ───────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Scoring Settings")
 
-    if missing_modules:
-        st.warning(
-            "Some optional parsers are missing: "
-            + ", ".join(missing_modules)
-            + ". PDF/DOCX uploads will be skipped until installed."
-        )
-        st.caption("Add them to requirements.txt and redeploy.")
-
-    new_weights = {}
     st.caption("Category Weights (relative)")
+    new_weights = {}
     for cat, val in cfg["weights"].items():
         new_weights[cat] = st.slider(f"{cat}", 0, 100, int(val))
     cfg["weights"] = new_weights
@@ -138,7 +138,7 @@ with st.sidebar:
             st.success("Config saved to session.")
     with c2:
         cfg_json = json.dumps(cfg, indent=2)
-        st.download_button("⬇️ Download Config JSON", cfg_json, file_name="mini_ats_config.json", mime="application/json")
+        st.download_button("⬇️ Download Config JSON", cfg_json, "mini_ats_config.json", "application/json")
 
     uploaded_cfg = st.file_uploader("⬆️ Load Config JSON", type=["json"], accept_multiple_files=False, label_visibility="collapsed")
     if uploaded_cfg is not None:
@@ -150,7 +150,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Failed to load config: {e}")
 
-# ---- Helpers -------------------------------------------------------------------
+# ── Helpers ────────────────────────────────────────────────────────────────────
 MONTHS = {m.lower(): i for i, m in enumerate(
     ["January","February","March","April","May","June","July","August","September","October","November","December"], start=1
 )}
@@ -167,27 +167,22 @@ DATE_RANGE_PATTERNS = [
 ]
 
 def normalise_year(y):
-    y = str(y)
-    if len(y) == 2:
-        yr = int(y)
-        return 2000 + yr if yr < 50 else 1900 + yr
-    return int(y)
+    s = str(y)
+    if len(s) == 2:
+        v = int(s)
+        return 2000 + v if v < 50 else 1900 + v
+    return int(s)
 
 def parse_date_str(month_str, year_str):
     if month_str is None:
         return dtparse.parse(f"01/01/{normalise_year(year_str)}")
     m_lower = month_str.lower()
-    if m_lower in MONTHS:
-        m = MONTHS[m_lower]
-    else:
-        m = MONTHS_ABBR.get(m_lower[:3], 1)
+    m = MONTHS.get(m_lower) or MONTHS_ABBR.get(m_lower[:3], 1)
     return dtparse.parse(f"{m}/01/{normalise_year(year_str)}")
 
 def extract_text(uploaded_file) -> str:
     """Extract text from PDF/DOCX/TXT. Skips formats if parser missing."""
-    name = uploaded_file.name.lower()
-
-    # Some hosts hand a SpooledTemporaryFile; ensure pointer at start
+    name = (getattr(uploaded_file, "name", "") or "").lower()
     try:
         uploaded_file.seek(0)
     except Exception:
@@ -195,33 +190,33 @@ def extract_text(uploaded_file) -> str:
 
     if name.endswith(".pdf"):
         if PdfReader is None:
-            st.warning(f"PDF parser (PyPDF2) not installed. Skipping: {uploaded_file.name}")
+            st.warning(f"PDF parser not installed (PyPDF2). Skipping: {uploaded_file.name}")
             return ""
         try:
             reader = PdfReader(uploaded_file)
-            text = []
-            for page in reader.pages:
+            chunks = []
+            for p in getattr(reader, "pages", []):
                 try:
-                    text.append(page.extract_text() or "")
+                    chunks.append(p.extract_text() or "")
                 except Exception:
-                    text.append("")
-            return "\n".join(text)
+                    chunks.append("")
+            return "\n".join(chunks)
         except Exception as e:
             st.error(f"Could not read PDF '{uploaded_file.name}': {e}")
             return ""
 
     if name.endswith(".docx"):
         if docx is None:
-            st.warning(f"DOCX parser (python-docx) not installed. Skipping: {uploaded_file.name}")
+            st.warning(f"DOCX parser not installed (python-docx). Skipping: {uploaded_file.name}")
             return ""
         try:
-            document = docx.Document(uploaded_file)
-            return "\n".join(p.text for p in document.paragraphs)
+            d = docx.Document(uploaded_file)
+            return "\n".join(p.text for p in d.paragraphs)
         except Exception as e:
             st.error(f"Could not read DOCX '{uploaded_file.name}': {e}")
             return ""
 
-    # TXT or anything else: try as UTF-8 text
+    # Fallback: try UTF-8 text
     try:
         uploaded_file.seek(0)
         return uploaded_file.read().decode("utf-8", errors="ignore")
@@ -236,8 +231,7 @@ def extract_contact_info(text):
         if len(line.strip()) < 3:
             continue
         if NAME_LINE_RE.match(line.strip()):
-            possible_name = line.strip()
-            break
+            possible_name = line.strip(); break
     return (possible_name or ""), (email.group(0) if email else ""), (phone.group(0) if phone else "")
 
 def find_date_ranges(text):
@@ -281,7 +275,7 @@ def keyword_hits(text, keywords):
     hits = set()
     for kw in keywords:
         k = kw.strip()
-        if not k: 
+        if not k:
             continue
         rx = r"(?<!\w)" + re.escape(k.lower()) + r"(?!\w)"
         if re.search(rx, t):
@@ -324,7 +318,7 @@ def highlight_keywords(text, all_keywords):
 def make_badge(text, cls):
     return f'<span class="badge {cls}">{text}</span>'
 
-# ---- Header --------------------------------------------------------------------
+# ── Header ─────────────────────────────────────────────────────────────────────
 title_col, ctrl_col = st.columns([0.75, 0.25])
 with title_col:
     st.markdown(
@@ -336,14 +330,10 @@ with title_col:
         """,
         unsafe_allow_html=True,
     )
-
 with ctrl_col:
-    if missing_modules:
-        st.error("Install missing: " + ", ".join(missing_modules))
-    else:
-        st.info("Tip: Edit everything in the sidebar.\nDownload CSV below results.")
+    st.info("Tip: Edit everything in the sidebar.\nDownload CSV below results.")
 
-# ---- Uploads -------------------------------------------------------------------
+# ── Uploads ────────────────────────────────────────────────────────────────────
 uploaded = st.file_uploader(
     "Upload CVs (PDF, DOCX, or TXT)",
     type=["pdf", "docx", "txt"],
@@ -411,10 +401,12 @@ else:
 
     df = pd.DataFrame(rows).sort_values(by="Score", ascending=False).reset_index(drop=True)
     st.subheader("📊 Ranked Candidates")
-    st.dataframe(df.style.format(precision=1), use_container_width=True, height=min(500, 120 + 35 * len(df)))
+    st.dataframe(df.style.format(precision=1), use_container_width=True,
+                 height=min(500, 120 + 35 * len(df)))
 
     csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download Results (CSV)", data=csv, file_name="mini_ats_results.csv", mime="text/csv")
+    st.download_button("⬇️ Download Results (CSV)", data=csv,
+                       file_name="mini_ats_results.csv", mime="text/csv")
 
     st.subheader("🔍 Details & Keyword Highlights")
     for html in details_sections:
