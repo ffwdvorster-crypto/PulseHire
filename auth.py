@@ -29,16 +29,26 @@ def change_password(email: str, new_password: str):
     conn.commit()
     conn.close()
 
-# --- Seed admin user ---
-def seed_admin():
+def ensure_seed_admin():
+    """Create seeded admin after DB init."""
     conn = db.get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE email=?", ("admin@pulsehire.local",))
+    # Make sure table exists (in case init wasn't called yet)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )
+    """)
+    cur.execute("SELECT 1 FROM users WHERE email=?", ("admin@pulsehire.local",))
     if not cur.fetchone():
-        cur.execute("INSERT INTO users (email, password) VALUES (?, ?)", 
-                    ("admin@pulsehire.local", hash_pw("admin123")))
+        cur.execute(
+            "INSERT INTO users (email, password) VALUES (?, ?)",
+            ("admin@pulsehire.local", hash_pw("admin123"))
+        )
     conn.commit()
     conn.close()
 
-# Call seeding on import
-seed_admin()
+# IMPORTANT: do NOT call ensure_seed_admin() here.
+# Call it from app.py *after* db.init_db().
