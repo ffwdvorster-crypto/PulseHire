@@ -1,25 +1,71 @@
-import streamlit as st
-from werkzeug.security import check_password_hash
-from db import get_user_by_email
+import os, base64, hashlib, hmac
+from dataclasses import dataclass
+from datetime import datetime, UTC
+from typing import Optional
+from db import connect
 
-SESSION_KEY = "pulsehire_user"
+PBKDF_ITER = 100_000
 
-def login_screen():
-    st.subheader("🔑 Login to PulseHire")
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-    if st.button("Login", type="primary"):
-        user = get_user_by_email(email)
-        if user and check_password_hash(user["password_hash"], password):
-            st.session_state[SESSION_KEY] = {k: user[k] for k in ("id","email","name","role")}
-            st.rerun()
-        else:
-            st.error("❌ Invalid credentials")
+@dataclass
+class User:
+    id: int
+    email: str
+    name: str
+    role: str
 
-def get_current_user():
-    return st.session_state.get(SESSION_KEY)
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
-def sign_out_button():
-    if st.button("Sign out"):
-        st.session_state.pop(SESSION_KEY, None)
-        st.rerun()
+def _hash_password(password: str, salt: bytes) -> str:
+    import hashlib, base64
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF_ITER)
+    return base64.b64encode(dk).decode()
+
+def create_user(email: str, name: str, role: str, password: str):
+    if role not in {"admin","recruiter","hr","viewer"}:
+        raise ValueError("Invalid role")
+    salt = os.urandom(16)
+    pw_hash = _hash_password(password, salt)
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "INSERT INTO users(email,name,role,password_hash,salt,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (email, name, role, pw_hash, base64.b64encode(salt).decode(), _now(), _now())
+        )
+
+def set_password(email: str, new_password: str):
+    salt = os.urandom(16)
+    pw_hash = _hash_password(new_password, salt)
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE users SET password_hash=?, salt=?, updated_at=? WHERE LOWER(email)=LOWER(?)",
+            (pw_hash, base64.b64encode(salt).decode(), _now(), email)
+        )
+        return cur.rowcount
+
+def verify_password(email: str, password: str) -> Optional[User]:
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute("SELECT * FROM users WHERE LOWER(email)=LOWER(?)", (email,))
+        row = cur.fetchone()
+        if not row: return None
+        salt = base64.b64decode(row["salt"])
+        expected = row["password_hash"]
+        test = _hash_password(password, salt)
+        if hmac.compare_digest(test, expected):
+            return User(id=row["id"], email=row["email"], name=row["name"], role=row["role"])
+        return None
+
+def users_exist() -> bool:
+    with connect() as con:
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM users")
+        return (cur.fetchone()["c"] or 0) > 0
+
+def seed_admin_if_empty():
+    if users_exist(): return
+    try:
+        create_user("admin@pulsehire.local", "Admin", "admin", "admin")
+    except Exception:
+        pass
