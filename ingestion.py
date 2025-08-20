@@ -1,12 +1,112 @@
 import io, json, os
 import pandas as pd
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from db import get_db
-from scoring import fuzzy_match_name
 
-# ---- TestGorilla ingestion ----
+# ---------- Applications (MS Forms export) ----------
+def _pick(cols, *keys):
+    """Find first column name that contains any of the keys (case-insensitive)."""
+    for key in keys:
+        k = key.lower()
+        for c in cols:
+            if k in c:
+                return cols[c]
+    return None
+
+def ingest_applications(xls_file):
+    """
+    Reads Application Excel and upserts candidates.
+    Columns it tries to detect (case-insensitive, partial match):
+      - name, email, phone, county
+      - availability, source, completion time, notes
+      - notice (start soon), leave (upcoming days off)
+    Auto-sets status = Applied.
+    Applies auto-DNC if county in blocked_counties (no override).
+    """
+    df = pd.read_excel(xls_file)
+    # Map lowercase -> actual column
+    cols = {str(c).lower(): c for c in df.columns}
+
+    c_name   = _pick(cols, "name")
+    c_email  = _pick(cols, "email")
+    c_phone  = _pick(cols, "phone", "mobile")
+    c_county = _pick(cols, "county", "location")
+    c_avail  = _pick(cols, "availability")
+    c_source = _pick(cols, "source")
+    c_ctime  = _pick(cols, "completion", "submitted")
+    c_notes  = _pick(cols, "notes", "comments")
+    c_notice = _pick(cols, "notice", "how soon", "start")
+    c_leave  = _pick(cols, "leave", "days off")
+
+    inserted = updated = skipped = dnc_applied = 0
+
+    with get_db() as con:
+        cur = con.cursor()
+
+        # Build blocked counties set
+        cur.execute("SELECT county FROM blocked_counties")
+        blocked = { (r[0] or "").strip().lower() for r in cur.fetchall() }
+
+        for _, row in df.iterrows():
+            name  = str(row.get(c_name, "")).strip() if c_name else ""
+            email = str(row.get(c_email, "")).strip().lower() if c_email else ""
+            phone = str(row.get(c_phone, "")).strip() if c_phone else ""
+            county= str(row.get(c_county, "")).strip() if c_county else ""
+            avail = str(row.get(c_avail, "")).strip() if c_avail else ""
+            source= str(row.get(c_source, "")).strip() if c_source else ""
+            ctime = str(row.get(c_ctime, "")).strip() if c_ctime else ""
+            notes = str(row.get(c_notes, "")).strip() if c_notes else ""
+            notice= str(row.get(c_notice, "")).strip() if c_notice else ""
+            leave = str(row.get(c_leave, "")).strip() if c_leave else ""
+
+            if not name and not email:
+                skipped += 1
+                continue
+
+            # Does a candidate exist (email preferred)?
+            cand_id = None
+            if email:
+                cur.execute("SELECT id FROM candidates WHERE lower(email)=?", (email,))
+                r = cur.fetchone()
+                if r: cand_id = r[0]
+
+            if cand_id:  # update basics
+                cur.execute("""UPDATE candidates SET
+                               name=COALESCE(?,name),
+                               phone=COALESCE(?,phone),
+                               county=COALESCE(?,county),
+                               availability=COALESCE(?,availability),
+                               source=COALESCE(?,source),
+                               completion_time=COALESCE(?,completion_time),
+                               notes=CASE WHEN ?='' THEN notes ELSE ? END,
+                               notice_period=COALESCE(?,notice_period),
+                               planned_leave=COALESCE(?,planned_leave),
+                               status=COALESCE(?,status),
+                               updated_at=CURRENT_TIMESTAMP
+                               WHERE id=?""",
+                            (name or None, phone or None, county or None, avail or None, source or None,
+                             ctime or None, notes, notes or None, notice or None, leave or None, "Applied", cand_id))
+                updated += 1
+            else:         # insert new
+                # Auto-DNC by county
+                is_dnc = 1 if ((county or "").strip().lower() in blocked) else 0
+                reason = "Outside hiring area" if is_dnc else None
+                if is_dnc: dnc_applied += 1
+
+                cur.execute("""INSERT INTO candidates
+                               (name,email,phone,county,availability,source,completion_time,notes,notice_period,planned_leave,status,dnc,dnc_reason)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (name or None, email or None, phone or None, county or None, avail or None, source or None,
+                             ctime or None, notes or None, notice or None, leave or None, "Applied", is_dnc, reason))
+                inserted += 1
+
+        con.commit()
+
+    return {"inserted": inserted, "updated": updated, "skipped": skipped, "dnc_applied": dnc_applied}
+
+# ---------- TestGorilla ingestion ----------
 def ingest_testgorilla(xls_file):
     df = pd.read_excel(xls_file)
     cols = {c.lower(): c for c in df.columns}
@@ -18,7 +118,7 @@ def ingest_testgorilla(xls_file):
     c_score = next((cols[k] for k in cols if "%score" in k or "score %" in k or "score"==k), None)
     c_pct   = next((cols[k] for k in cols if "percentile" in k), None)
 
-    matched, created = 0, 0
+    matched = 0
     with get_db() as con:
         cur = con.cursor()
         for _, row in df.iterrows():
@@ -32,11 +132,9 @@ def ingest_testgorilla(xls_file):
                 if r: cand_id = r[0]
             if not cand_id and name:
                 cur.execute("SELECT id,name FROM candidates")
-                allc = cur.fetchall()
-                # pick best fuzzy
                 best = None; best_score = 0
-                for cid, cname in allc:
-                    sc = fuzzy_match_name(name, cname)
+                for cid, cname in cur.fetchall():
+                    sc = fuzz.token_set_ratio(name, cname or "")
                     if sc > best_score:
                         best_score = sc; best = cid
                 if best_score >= 85:
@@ -50,11 +148,9 @@ def ingest_testgorilla(xls_file):
             try:
                 score_pct = float(score_raw)
             except Exception:
-                # try to parse like "78%"
                 if score_raw.endswith("%"):
                     try: score_pct = float(score_raw[:-1])
                     except Exception: score_pct = None
-            percentile = str(row.get(c_pct, "")).strip() if c_pct else ""
 
             cur.execute("INSERT INTO test_scores(candidate_id,provider,test_name,score_raw,score_pct) VALUES(?,?,?,?,?)",
                         (cand_id,"TestGorilla", tname or None, score_raw or None, score_pct))
@@ -62,7 +158,7 @@ def ingest_testgorilla(xls_file):
         con.commit()
     return matched
 
-# ---- Interview Notes ingestion ----
+# ---------- Interview Notes ingestion ----------
 def save_row_pdf(filename, row_dict):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
@@ -100,12 +196,12 @@ def ingest_interview_notes(xls_file):
     updated = 0
     with get_db() as con:
         cur = con.cursor()
+        cur.execute("SELECT id,name FROM candidates")
+        allc = cur.fetchall()
         for _, row in df.iterrows():
             name = str(row.get(c_name, "")).strip()
             if not name: continue
             # fuzzy match candidate
-            cur.execute("SELECT id,name FROM candidates")
-            allc = cur.fetchall()
             best = None; best_score = 0
             for cid, cname in allc:
                 sc = fuzz.token_set_ratio(name, cname or "")
@@ -129,7 +225,6 @@ def ingest_interview_notes(xls_file):
                         (cid, f"InterviewNotes_{cid}.pdf", pdf_path, "Interview Notes"))
 
             # update candidate fields
-            # status Interviewed
             cur.execute("UPDATE candidates SET status=?, notice_period=?, planned_leave=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         ("Interviewed", notice or None, leave or None, cid))
             updated += 1
