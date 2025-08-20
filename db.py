@@ -41,3 +41,22 @@ def get_user_by_email(email: str):
     cur.execute("SELECT * FROM users WHERE lower(email)=lower(?)", (email,))
     row = cur.fetchone()
     return dict(row) if row else None
+
+def set_setting(key, value_json):
+    import json
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT)")
+    cur.execute("INSERT OR REPLACE INTO settings(key,value_json) VALUES(?,?)",
+                (key, json.dumps(value_json)))
+    conn.commit()
+
+def get_setting(key, default=None):
+    import json
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT)")
+    cur.execute("SELECT value_json FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    return (json.loads(row["value_json"]) if row else default)
