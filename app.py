@@ -4,6 +4,10 @@ import db, auth, ingestion, scoring
 
 st.set_page_config(page_title="PulseHire ATS", layout="wide")
 
+# Initialize DB schema first, then seed admin
+db.init_db()
+auth.ensure_seed_admin()
+
 # --- Navigation ---
 NAV_ITEMS = [
     ("📊 Dashboard", "dashboard"),
