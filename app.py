@@ -52,7 +52,7 @@ NAV_ITEMS = [
     ("🎯 Campaigns", "campaigns"),
     ("🚀 Active recruitment", "active"),
     ("👥 Candidates", "candidates_upload"),
-    ("📥 Ingestion", "ingestion"),
+    ("📥 Imports", "imports"), 
     ("✨ Keywords", "scoring"),
     ("🗺️ Hiring Areas", "counties"),
     ("⚖️ Compliance", "compliance"),
@@ -244,8 +244,8 @@ def candidates_upload_ui():
             n = ingestion.ingest_applications(df, is_test=test_flag)
             st.success(f"Ingested {n} application rows.")
 
-def ingestion_ui():
-    st.subheader("📥 Ingestion")
+def imports_ui():
+    st.subheader("📥 Imports")
     st.caption("Upload TestGorilla results and interview notes.")
     test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.")
 
@@ -256,9 +256,19 @@ def ingestion_ui():
         if tg:
             df = pd.read_csv(tg)
             st.dataframe(df.head(20))
-            if st.button("Ingest TestGorilla"):
+            if st.button("Import TestGorilla"):
                 n = ingestion.ingest_testgorilla(df, is_test=test_flag)
-                st.success(f"Ingested {n} TestGorilla rows.")
+                st.success(f"Imported {n} TestGorilla rows.")
+
+    with tab2:
+        inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="inv")
+        if inv:
+            df = pd.read_csv(inv)
+            st.dataframe(df.head(20))
+            if st.button("Import Interview Notes"):
+                n = ingestion.ingest_interview_notes(df, is_test=test_flag)
+                st.success(f"Imported {n} interview note rows.")
+
 
     with tab2:
         inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="inv")
@@ -359,8 +369,8 @@ elif page == "active":
     active_recruitment_ui()
 elif page == "candidates_upload":
     candidates_upload_ui()
-elif page == "ingestion":
-    ingestion_ui()
+elif page == "imports":
+    imports_ui()
 elif page == "scoring":
     scoring_ui()
 elif page == "counties":
