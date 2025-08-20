@@ -1,4 +1,4 @@
-# app.py — PulseHire full app per spec
+# app.py — PulseHire full app per spec, with default Admin seeding + login
 import os, io, json
 from datetime import datetime, date
 import pandas as pd
@@ -12,24 +12,24 @@ from ingestion import import_testgorilla, import_interview_notes, save_attachmen
 from utils import subtract_workdays, apply_dnc_blocked_counties
 
 APP_VERSION = "0.1.0"
-
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 st.set_page_config(page_title="PulseHire", layout="wide")
 
-# Init DB + seed admin if needed
+# ===== Init DB and seed default Admin =====
 init_db()
-seed_admin_if_empty()
+seed_admin_if_empty()  # creates admin@pulsehire.local / admin on first run if empty
 
-# Theme toggle
+# ===== Theme toggle =====
 if "theme_dark" not in st.session_state:
     st.session_state["theme_dark"] = True
 inject_css(st, dark=st.session_state["theme_dark"])
 
-# Auth
+# ===== Auth UI =====
 def login_ui():
-    st.image(BRAND["logo_path"], width=140) if os.path.exists(BRAND["logo_path"]) else None
+    if os.path.exists(BRAND["logo_path"]):
+        st.image(BRAND["logo_path"], width=140)
     st.markdown(f"## {BRAND['name']}")
     st.caption("Login with your email and password")
     email = st.text_input("Email")
@@ -42,13 +42,13 @@ def login_ui():
         else:
             st.error("Invalid credentials")
     st.divider()
-    st.caption("First-time admin? Default user is **admin@pulsehire.local / admin** — change it after login.")
+    st.caption("Default admin is **admin@pulsehire.local / admin** (auto-created if no users). Please change it after login.")
 
 def require_role(allowed):
     user = st.session_state.get("user")
     return user and user.get("role") in allowed
 
-# Header
+# ===== Header =====
 def app_header():
     cols = st.columns([0.08, 0.62, 0.30])
     with cols[0]:
@@ -68,30 +68,32 @@ def app_header():
                 st.session_state.pop("user", None)
                 st.rerun()
 
-# Sidebar nav (RBAC-aware)
+# ===== Sidebar nav (with Admin create-user tool) =====
 PAGES = ["Dashboard","Campaigns","Active recruitment","Candidates","Do Not Call","Keywords","Hiring Areas","Compliance","Changelog"]
 
 def sidebar_nav():
     st.sidebar.markdown("### Navigation")
     page = st.sidebar.radio("", PAGES, index=3)
+
+    # Admin-only: create user utility
     if require_role(["admin"]):
         with st.sidebar.expander("Admin"):
-            if st.button("Create user (demo)"):
-                with st.form("new_user"):
-                    email = st.text_input("Email")
-                    name  = st.text_input("Name")
-                    role  = st.selectbox("Role", ["admin","recruiter","hr","viewer"])
-                    pw    = st.text_input("Password", type="password")
-                    if st.form_submit_button("Create"):
-                        try:
-                            create_user(email, name, role, pw)
-                            st.success("User created.")
-                        except Exception as e:
-                            st.error(str(e))
+            st.caption("Create new user")
+            with st.form("new_user"):
+                email = st.text_input("Email")
+                name  = st.text_input("Name")
+                role  = st.selectbox("Role", ["admin","recruiter","hr","viewer"])
+                pw    = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Create")
+            if submitted:
+                try:
+                    create_user(email, name or email.split("@")[0], role, pw)
+                    st.success(f"User {email} created.")
+                except Exception as e:
+                    st.error(str(e))
     return page
 
-# === Pages ===
-
+# ===== Pages =====
 def page_dashboard():
     st.subheader("Dashboard")
     with connect() as con:
@@ -132,7 +134,6 @@ def page_active_recruitment():
     st.subheader("Active recruitment")
     with connect() as con:
         cur = con.cursor()
-        # Create
         with st.form("new_active"):
             cur.execute("SELECT id,name FROM campaigns ORDER BY name")
             rows = cur.fetchall()
@@ -142,12 +143,11 @@ def page_active_recruitment():
             cutoff_default = subtract_workdays(start, 7)
             cutoff = st.date_input("Cutoff date", value=cutoff_default)
             notes = st.text_area("Notes", "")
-            if st.form_submit_button("Start"):
+            if st.form_submit_button("Start") and camp_name:
                 cur.execute("""INSERT INTO active_recruitment(campaign_id,start_date,cutoff_date,notes,is_active,created_at,updated_at)
                                VALUES(?,?,?,?,1,datetime('now'),datetime('now'))""",
                             (campaign_map[camp_name], start.isoformat(), cutoff.isoformat(), notes))
                 st.success("Active recruitment started.")
-
     with connect() as con:
         df = pd.read_sql_query("""SELECT a.id, c.name as campaign, a.start_date, a.cutoff_date, a.is_active, a.notes
                                   FROM active_recruitment a JOIN campaigns c ON a.campaign_id=c.id
@@ -180,7 +180,7 @@ def _candidate_filters_ui():
 def page_candidates():
     st.subheader("Candidates")
 
-    # Ingest actions
+    # Ingest
     with st.expander("Ingest files"):
         c1, c2 = st.columns(2)
         with c1:
@@ -197,23 +197,18 @@ def page_candidates():
     # Filters
     f = _candidate_filters_ui()
 
-    # Fetch + filter
     with connect() as con:
-        base = "SELECT * FROM candidates"
-        df = pd.read_sql_query(base, con)
-    if f["status"] != "(any)":
-        df = df[df["status"]==f["status"]]
-    if f["tier"] != "(any)":
-        df = df[df["score_tier"]==f["tier"]]
-    if f["dnc"] != "(any)":
-        df = df[df["dnc"] == (1 if f["dnc"]=="Yes" else 0)]
+        df = pd.read_sql_query("SELECT * FROM candidates", con)
+    if f["status"] != "(any)": df = df[df["status"]==f["status"]]
+    if f["tier"] != "(any)":   df = df[df["score_tier"]==f["tier"]]
+    if f["dnc"] != "(any)":    df = df[df["dnc"] == (1 if f["dnc"]=="Yes" else 0)]
     if f["q"]:
         ql = f["q"].strip().lower()
         df = df[df.apply(lambda r: ql in (str(r["name"]).lower() if r["name"] else "") or
                                    ql in (str(r["email"]).lower() if r["email"] else "") or
                                    ql in (str(r["phone"]).lower() if r["phone"] else ""), axis=1)]
 
-    # Left sidebar picker (alphabetical)
+    # Picker
     names = df.sort_values("name", na_position="last")["name"].fillna("—").tolist()
     ids = df.sort_values("name", na_position="last")["id"].tolist()
     pick = st.selectbox("Candidate picker (A–Z)", [f"{n} (#{i})" for n,i in zip(names, ids)]) if ids else None
@@ -244,7 +239,6 @@ def page_candidates():
     st.markdown("### Candidate table")
     st.dataframe(df[["id","name","email","phone","county","status","score_tier","dnc"]], use_container_width=True, height=400)
 
-    # Candidate file view
     if selected_id:
         render_candidate_file(selected_id)
 
@@ -258,7 +252,7 @@ def render_candidate_file(cid: int):
         st.warning("Candidate not found.")
         return
 
-    # Sticky header
+    # Header
     left, right = st.columns([0.7, 0.3])
     with left:
         st.markdown(f"### {cand['name'] or '—'}")
@@ -270,7 +264,7 @@ def render_candidate_file(cid: int):
         if flags.get("previous_employee"): chips.append(("HR clearance", "Required"))
         if flags.get("call_centre_inferred"): chips.append(("Call centre exp", "Inferred"))
         for k,v in chips:
-            st.markdown(f"<span class='chip' style='background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,.12)'>{k}: <b>{v}</b></span> ", unsafe_allow_html=True)
+            st.markdown(f"<span style='display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:.8rem;font-weight:700;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,.12)'>{k}: <b>{v}</b></span> ", unsafe_allow_html=True)
     with right:
         st.write(cand["email"] or "—")
         st.write(cand["phone"] or "—")
@@ -308,8 +302,6 @@ def render_candidate_file(cid: int):
                             (tier, json.dumps(flags), cid))
             st.success(f"Scored: **{tier}** ({flags.get('score_pct')}%)")
             st.experimental_rerun()
-
-        # show current tier/flags
         st.write(f"Current tier: **{cand['score_tier'] or '—'}**")
         st.json(json.loads(cand["flags_json"]) if cand["flags_json"] else {})
 
@@ -322,7 +314,6 @@ def render_candidate_file(cid: int):
         st.write("Interview imports will attach a PDF automatically to the Attachments tab and set status to Interviewed.")
 
     with tabs[4]:
-        # Upload any document
         up = st.file_uploader("Add attachment", type=None, key=f"att_{cid}")
         doc_type = st.selectbox("Doc type", ["CV","Visa","Speed Test","Interview Notes","Other"])
         if up and st.button("Upload attachment"):
@@ -451,34 +442,13 @@ def page_changelog():
 - RBAC + pages + ingestion + scoring
 """)
 
-# ===== App flow =====
+# ===== App router =====
 if "user" not in st.session_state:
     login_ui()
 else:
     app_header()
     page = sidebar_nav()
-
-    # RBAC guards (simple: all pages accessible; enforce edits by role where applicable)
     if page == "Dashboard": page_dashboard()
     elif page == "Campaigns":
         if require_role(["admin","recruiter"]): page_campaigns()
         else: st.warning("Insufficient permissions.")
-    elif page == "Active recruitment":
-        if require_role(["admin","recruiter"]): page_active_recruitment()
-        else: st.warning("Insufficient permissions.")
-    elif page == "Candidates":
-        if require_role(["admin","recruiter","hr","viewer"]): page_candidates()
-        else: st.warning("Insufficient permissions.")
-    elif page == "Do Not Call":
-        if require_role(["admin","recruiter"]): page_dnc()
-        else: st.warning("Insufficient permissions.")
-    elif page == "Keywords":
-        if require_role(["admin"]): page_keywords()
-        else: st.warning("Admin only.")
-    elif page == "Hiring Areas":
-        if require_role(["admin"]): page_hiring_areas()
-        else: st.warning("Admin only.")
-    elif page == "Compliance":
-        page_compliance()
-    elif page == "Changelog":
-        page_changelog()
