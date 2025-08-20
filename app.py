@@ -252,7 +252,7 @@ def imports_ui():
     tab1, tab2 = st.tabs(["TestGorilla", "Interview Notes"])
 
     with tab1:
-        tg = st.file_uploader("Upload TestGorilla CSV", type=["csv"], key="tg")
+        tg = st.file_uploader("Upload TestGorilla CSV", type=["csv"], key="upload_tg")
         if tg:
             df = pd.read_csv(tg)
             st.dataframe(df.head(20))
@@ -261,7 +261,7 @@ def imports_ui():
                 st.success(f"Imported {n} TestGorilla rows.")
 
     with tab2:
-        inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="inv")
+        inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="upload_inv")
         if inv:
             df = pd.read_csv(inv)
             st.dataframe(df.head(20))
