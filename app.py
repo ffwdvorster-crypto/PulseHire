@@ -1,4 +1,3 @@
-
 import os
 import io
 import pandas as pd
@@ -21,11 +20,7 @@ if os.path.exists(theme_file):
         initial_sidebar_state="expanded"
     )
 else:
-    st.set_page_config(
-        page_title="PulseHire ATS",
-        page_icon="💙",
-        layout="wide"
-    )
+    st.set_page_config(page_title="PulseHire ATS", page_icon="💙", layout="wide")
 
 # Ensure DB + seed keywords + admin
 db.init_db(seed=True, seed_keywords=scoring.DEFAULT_KEYWORDS, seed_admin=True)
@@ -36,35 +31,18 @@ def _exists_assets_file(*parts):
     path = os.path.join("assets", *parts)
     return os.path.exists(path), path
 
-# --- Fancy-ish sidebar nav buttons (pure Streamlit + CSS) ---
+# --- Sidebar styling ---
 SIDEBAR_CSS = """
 <style>
-/* Sidebar button look */
 div[data-testid="stSidebar"] .sidebar-btn {
-  display: block;
-  width: 100%;
-  padding: 10px 14px;
-  margin: 6px 0;
-  background: #1f2630;
-  border: 1px solid #2a3340;
-  border-radius: 10px;
-  color: #e6f5ff;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
-  font-weight: 600;
+  display:block;width:100%;padding:10px 14px;margin:6px 0;
+  background:#1f2630;border:1px solid #2a3340;border-radius:10px;
+  color:#e6f5ff;text-decoration:none;cursor:pointer;
+  transition:background .15s ease,border-color .15s ease;font-weight:600;
 }
-div[data-testid="stSidebar"] .sidebar-btn:hover {
-  background: #26303c;
-  border-color: #334154;
-}
-div[data-testid="stSidebar"] .sidebar-btn.active {
-  background: #0e7490; /* teal-ish */
-  border-color: #0ea5b7;
-  color: white;
-}
-.sidebar-spacer { height: 8px; }
-.logo-wrap img { max-width: 240px; }
+div[data-testid="stSidebar"] .sidebar-btn:hover { background:#26303c;border-color:#334154; }
+div[data-testid="stSidebar"] .sidebar-btn.active { background:#0e7490;border-color:#0ea5b7;color:#fff; }
+.logo-wrap img { max-width:240px; }
 </style>
 """
 st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
@@ -74,7 +52,7 @@ NAV_ITEMS = [
     ("🎯 Campaigns", "campaigns"),
     ("🚀 Active recruitment", "active"),
     ("👥 Candidates", "candidates_upload"),
-    ("⛔ Do Not Call", "dnc"),
+    ("📥 Ingestion", "ingestion"),
     ("✨ Keywords", "scoring"),
     ("🗺️ Hiring Areas", "counties"),
     ("⚖️ Compliance", "compliance"),
@@ -88,7 +66,6 @@ if "nav" not in st.session_state:
 
 def sidebar_nav():
     with st.sidebar:
-        # Logo (optional – only if present)
         has_logo, logo_path = _exists_assets_file("logo.png")
         if has_logo:
             st.image(logo_path, use_column_width=False, width=240)
@@ -96,15 +73,10 @@ def sidebar_nav():
             st.markdown("### PulseHire")
 
         st.markdown("---")
-        # Render "buttons"
         for label, key in NAV_ITEMS:
-            is_active = st.session_state.nav == key
-            classes = "sidebar-btn active" if is_active else "sidebar-btn"
             if st.button(label, key=f"nav-{key}", use_container_width=True):
                 st.session_state.nav = key
                 st.rerun()
-            # Hack: add class via markdown (visual only) – button can't be styled directly, so we emulate via spacing.
-            st.markdown(f'<div class="{classes}" style="display:none"></div>', unsafe_allow_html=True)
         st.markdown("---")
         if st.button("Log out", type="secondary", use_container_width=True):
             st.session_state.user = None
@@ -114,7 +86,6 @@ def sidebar_nav():
 def dashboard_ui():
     st.title("PulseHire ATS")
     st.subheader("📊 Dashboard")
-    # Simple KPIs
     conn = db.get_connection()
     cur = conn.cursor()
     try:
@@ -127,13 +98,12 @@ def dashboard_ui():
     c1.metric("Candidates", total_candidates)
     c2.metric("Campaigns", total_campaigns)
     c3.metric("Assessments", total_tests)
-    st.caption("Tip: Use **Active recruitment** to list campaigns and attach quick notes, or jump to **Candidates** to ingest CSVs.")
+    st.caption("Tip: Upload applications in **Candidates**, assessments/notes in **Ingestion**, and manage jobs in **Campaigns**.")
 
 def account_ui():
     st.subheader("👤 Account")
     st.write(f"Signed in as **{st.session_state.user['email']}** (role: {st.session_state.user['role']})")
     with st.form("change_pw"):
-        st.write("Change password")
         old = st.text_input("Current password", type="password")
         new = st.text_input("New password", type="password")
         ok = st.form_submit_button("Update Password")
@@ -141,7 +111,7 @@ def account_ui():
             if auth.change_password(st.session_state.user["email"], old, new):
                 st.success("Password updated.")
             else:
-                st.error("Password change failed. Check your current password.")
+                st.error("Password change failed.")
 
     if st.session_state.user["role"] == "admin":
         st.markdown("---")
@@ -174,16 +144,40 @@ def campaigns_ui():
                 db.add_campaign(name=name, hours=hours, keywords="; ".join(selected) if selected else None, notes=notes)
                 st.success("Campaign added.")
 
-    st.markdown("**Campaign CSV template**")
-    has_tpl, tpl_path = _exists_assets_file("campaigns_template.csv")
-    if has_tpl:
-        with open(tpl_path, "rb") as f:
-            st.download_button("Download campaigns_template.csv", f, file_name="campaigns_template.csv")
-    else:
-        st.info("No template file found in `assets/`. Click to generate one now.")
-        sample = "name,hours,keywords,notes\nTelehealth Nurse,Mon-Fri 09:00-17:00,\"Customer Service; CRM Software\",Urgent backfill\n"
-        st.download_button("Generate & download campaigns_template.csv", data=sample.encode("utf-8"),
-                           file_name="campaigns_template.csv", mime="text/csv")
+    colL, colR = st.columns([1,1])
+    with colL:
+        st.markdown("**Campaign CSV template**")
+        has_tpl, tpl_path = _exists_assets_file("campaigns_template.csv")
+        if has_tpl:
+            with open(tpl_path, "rb") as f:
+                st.download_button("Download campaigns_template.csv", f, file_name="campaigns_template.csv")
+        else:
+            sample = "name,hours,keywords,notes\nTelehealth Nurse,Mon-Fri 09:00-17:00,\"Customer Service; CRM Software\",Urgent backfill\n"
+            st.download_button("Generate template", data=sample.encode("utf-8"),
+                               file_name="campaigns_template.csv", mime="text/csv")
+    with colR:
+        st.markdown("**Import campaigns CSV**")
+        up = st.file_uploader("Upload campaigns CSV", type=["csv"], key="campaigns_csv")
+        if up is not None:
+            try:
+                df = pd.read_csv(up)
+                required = {"name","hours","keywords","notes"}
+                missing = required - set(c.lower() for c in df.columns)
+                if missing:
+                    st.error(f"Missing columns: {', '.join(sorted(missing))}")
+                else:
+                    cnt = 0
+                    for _, row in df.iterrows():
+                        db.add_campaign(
+                            name=str(row["name"]) if pd.notna(row["name"]) else None,
+                            hours=str(row["hours"]) if pd.notna(row["hours"]) else None,
+                            keywords=str(row["keywords"]) if pd.notna(row["keywords"]) else None,
+                            notes=str(row["notes"]) if pd.notna(row["notes"]) else None
+                        )
+                        cnt += 1
+                    st.success(f"Imported {cnt} campaign(s).")
+            except Exception as e:
+                st.error(f"Failed to import: {e}")
 
     st.markdown("---")
     st.write("**Existing campaigns**")
@@ -192,6 +186,20 @@ def campaigns_ui():
         st.dataframe(pd.DataFrame(rows))
     else:
         st.info("No campaigns yet.")
+
+def active_recruitment_ui():
+    st.subheader("🚀 Active recruitment")
+    st.caption("Quick view of campaigns for day-to-day use.")
+    rows = db.list_campaigns()
+    if not rows:
+        st.info("No campaigns yet. Add some in **Campaigns**.")
+        return
+    df = pd.DataFrame(rows)
+    q = st.text_input("Filter by name/keywords")
+    if q:
+        ql = q.lower()
+        df = df[df.apply(lambda r: ql in str(r.get("name","")).lower() or ql in str(r.get("keywords","")).lower(), axis=1)]
+    st.dataframe(df[["name","hours","keywords","notes","created_at"]].sort_values("created_at", ascending=False))
 
 def counties_ui():
     st.subheader("🗺️ Hiring Areas (Counties)")
@@ -202,7 +210,9 @@ def counties_ui():
     st.dataframe(pd.DataFrame({"County": existing}))
 
     with st.form("add_counties"):
-        block = st.text_area("Add multiple counties", placeholder="Wexford, Dublin; Cork\nSligo", help="Use commas, semicolons, or new lines as delimiters.")
+        block = st.text_area("Add multiple counties",
+                             placeholder="Wexford, Dublin; Cork\nSligo",
+                             help="Use commas, semicolons, or new lines as delimiters.")
         ok = st.form_submit_button("Add")
         if ok:
             raw = block or ""
@@ -221,11 +231,11 @@ def counties_ui():
             st.success(f"Removed {to_remove}")
 
 def candidates_upload_ui():
-    st.subheader("👥 Candidates Upload")
+    st.subheader("👥 Candidates (Applications)")
     st.caption("Bulk upload candidates/applications as CSV.")
 
     test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.")
-    f = st.file_uploader("Upload CSV", type=["csv"])
+    f = st.file_uploader("Upload applications CSV", type=["csv"])
     if f is not None:
         df = pd.read_csv(f)
         st.write("Preview:")
@@ -237,7 +247,6 @@ def candidates_upload_ui():
 def ingestion_ui():
     st.subheader("📥 Ingestion")
     st.caption("Upload TestGorilla results and interview notes.")
-
     test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.")
 
     tab1, tab2 = st.tabs(["TestGorilla", "Interview Notes"])
@@ -264,13 +273,13 @@ def scoring_ui():
     st.subheader("✨ Keywords & Scoring")
     st.caption("Fuzzy match resume text against tiered keywords. Add new keywords and rescore.")
 
-    # Keyword management
     with st.expander("➕ Add keyword"):
         col1, col2 = st.columns([2,1])
         with col1:
             term = st.text_input("Keyword/phrase")
         with col2:
-            tier = st.selectbox("Tier", [1,2,3], help="1 = must-have (weight 3), 2 = important (weight 2), 3 = nice (weight 1)")
+            tier = st.selectbox("Tier", [1,2,3],
+                                help="1 = must-have (weight 3), 2 = important (weight 2), 3 = nice (weight 1)")
         notes = st.text_input("Notes (optional)")
         if st.button("Add keyword"):
             if term.strip():
@@ -289,7 +298,7 @@ def scoring_ui():
     conn.close()
 
     if not rows:
-        st.info("No candidates. Upload some in 'Candidates' or via 'Ingestion'.")
+        st.info("No candidates. Upload some in **Candidates** or via **Ingestion**.")
         return
 
     df = pd.DataFrame(rows)
@@ -334,28 +343,24 @@ def login_ui():
 # --- Auth gate ---
 if "user" not in st.session_state:
     st.session_state.user = None
-
 if st.session_state.user is None:
     login_ui()
     st.stop()
 
 # --- Sidebar + router ---
 sidebar_nav()
-
-# Route to the page
 page = st.session_state.nav
+
 if page == "dashboard":
     dashboard_ui()
 elif page == "campaigns":
     campaigns_ui()
 elif page == "active":
-    # Simple view aliasing to campaigns for now
-    campaigns_ui()
+    active_recruitment_ui()
 elif page == "candidates_upload":
     candidates_upload_ui()
-elif page == "dnc":
-    st.subheader("⛔ Do Not Call")
-    st.info("Placeholder — add DNC list management here.")
+elif page == "ingestion":
+    ingestion_ui()
 elif page == "scoring":
     scoring_ui()
 elif page == "counties":
