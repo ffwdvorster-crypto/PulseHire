@@ -100,25 +100,104 @@ def page_dashboard():
 
 def page_campaigns():
     st.markdown("### Campaigns")
-    if role_can_edit():
-        with st.form("add_campaign"):
-            name = st.text_input("Name")
-            hours_notes = st.text_area("Hours notes")
-            requirements_text = st.text_area("Requirements text")
-            req_weekends = st.checkbox("Needs weekends", value=False)
-            req_evenings = st.checkbox("Needs evenings", value=False)
-            req_weekdays = st.checkbox("Needs weekdays", value=True)
-            req_remote = st.checkbox("Remote OK", value=False)
-            ok = st.form_submit_button("Create campaign")
-        if ok and name:
-            with db.get_db() as con:
-                con.execute("""INSERT INTO campaigns(name,hours_notes,requirements_text,
-                    req_need_weekends,req_need_evenings,req_need_weekdays,req_remote_ok)
-                    VALUES(?,?,?,?,?,?,?)""", (name,hours_notes,requirements_text,int(req_weekends),int(req_evenings),int(req_weekdays),int(req_remote)))
-            st.success("Campaign created.")
+
     with db.get_db() as con:
-        df = pd.read_sql_query("SELECT * FROM campaigns ORDER BY created_at DESC", con)
-    st.dataframe(df, use_container_width=True)
+        campaigns = pd.read_sql_query("""
+            SELECT c.id, c.name, c.requirements_text, c.req_need_weekends, 
+                   c.req_need_evenings, c.req_need_weekdays, c.req_remote_ok, 
+                   GROUP_CONCAT(k.keyword) as keywords
+            FROM campaigns c
+            LEFT JOIN campaign_keywords k ON c.id = k.campaign_id
+            GROUP BY c.id
+            ORDER BY LOWER(c.name)
+        """, con)
+
+    st.dataframe(campaigns, use_container_width=True, height=260)
+
+    # === helper: ensure keyword exists ===
+    def ensure_keywords(conn, kws):
+        for kw in kws:
+            conn.execute("INSERT OR IGNORE INTO keywords(keyword) VALUES(?)", (kw,))
+
+    # === Add new campaign ===
+    with st.expander("➕ Add New Campaign"):
+        name = st.text_input("Campaign Name")
+        reqs = st.text_area("Requirements / Notes")
+        col1, col2, col3, col4 = st.columns(4)
+        weekends = col1.checkbox("Weekends")
+        evenings = col2.checkbox("Evenings")
+        weekdays = col3.checkbox("Weekdays")
+        remote = col4.checkbox("Remote OK")
+
+        # get all global keywords
+        with db.get_db() as con:
+            global_keywords = [r[0] for r in con.execute("SELECT DISTINCT keyword FROM keywords ORDER BY keyword").fetchall()]
+
+        selected_keywords = st.multiselect("Relevant Keywords", global_keywords)
+        new_keywords = st.text_input("Add new keywords (comma or semicolon separated)")
+
+        if st.button("Save Campaign", type="primary"):
+            if not name:
+                st.warning("Campaign name required.")
+            else:
+                add_kws = [kw.strip() for kw in re.split(r"[;,]", new_keywords) if kw.strip()]
+                all_kws = list(set(selected_keywords + add_kws))
+                with db.get_db() as con:
+                    cur = con.execute("""
+                        INSERT INTO campaigns(name, requirements_text, req_need_weekends, req_need_evenings, req_need_weekdays, req_remote_ok, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """, (name, reqs, weekends, evenings, weekdays, remote))
+                    cid = cur.lastrowid
+                    ensure_keywords(con, all_kws)
+                    for kw in all_kws:
+                        con.execute("INSERT INTO campaign_keywords(campaign_id, keyword) VALUES(?,?)", (cid, kw))
+                st.success(f"Campaign '{name}' added.")
+                st.rerun()
+
+    # === Edit/Delete campaigns ===
+    with st.expander("✏️ Edit / Delete Campaigns"):
+        if len(campaigns) == 0:
+            st.info("No campaigns yet.")
+        else:
+            cid = st.selectbox("Select campaign to edit", campaigns["id"], format_func=lambda x: campaigns[campaigns["id"]==x]["name"].values[0])
+            row = campaigns[campaigns["id"]==cid].iloc[0]
+
+            new_name = st.text_input("Campaign Name", row["name"])
+            new_reqs = st.text_area("Requirements / Notes", row["requirements_text"] or "")
+            col1, col2, col3, col4 = st.columns(4)
+            weekends = col1.checkbox("Weekends", bool(row["req_need_weekends"]))
+            evenings = col2.checkbox("Evenings", bool(row["req_need_evenings"]))
+            weekdays = col3.checkbox("Weekdays", bool(row["req_need_weekdays"]))
+            remote = col4.checkbox("Remote OK", bool(row["req_remote_ok"]))
+
+            with db.get_db() as con:
+                global_keywords = [r[0] for r in con.execute("SELECT DISTINCT keyword FROM keywords ORDER BY keyword").fetchall()]
+            kw_current = row["keywords"].split(",") if row["keywords"] else []
+            kw_new = st.multiselect("Relevant Keywords", global_keywords, default=kw_current)
+            new_keywords = st.text_input("Add new keywords to this campaign (comma/semicolon separated)")
+
+            cols = st.columns(2)
+            if cols[0].button("Update Campaign", type="primary"):
+                add_kws = [kw.strip() for kw in re.split(r"[;,]", new_keywords) if kw.strip()]
+                all_kws = list(set(kw_new + add_kws))
+                with db.get_db() as con:
+                    con.execute("""UPDATE campaigns SET name=?, requirements_text=?, req_need_weekends=?, req_need_evenings=?, 
+                                   req_need_weekdays=?, req_remote_ok=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                                (new_name, new_reqs, weekends, evenings, weekdays, remote, cid))
+                    con.execute("DELETE FROM campaign_keywords WHERE campaign_id=?", (cid,))
+                    ensure_keywords(con, all_kws)
+                    for kw in all_kws:
+                        con.execute("INSERT INTO campaign_keywords(campaign_id, keyword) VALUES(?,?)", (cid, kw))
+                st.success("Updated successfully.")
+                st.rerun()
+
+            if cols[1].button("🗑️ Delete Campaign", type="secondary"):
+                with db.get_db() as con:
+                    con.execute("DELETE FROM campaigns WHERE id=?", (cid,))
+                    con.execute("DELETE FROM campaign_keywords WHERE campaign_id=?", (cid,))
+                st.success("Deleted successfully.")
+                st.rerun()
+
 
 def page_active_recruitment():
     st.markdown("### Active recruitment")
