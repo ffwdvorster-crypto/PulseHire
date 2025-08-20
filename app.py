@@ -373,18 +373,63 @@ def page_keywords():
         db.set_setting("keywords", cur); st.success("Saved.")
 
 def page_hiring_areas():
+    import re
     st.markdown("### Hiring Areas (blocked counties)")
+
+    def parse_multi(text: str):
+        if not text:
+            return []
+        parts = re.split(r"[,\n;]+", text)
+        return [p.strip() for p in parts if p.strip()]
+
+    # Show current list
     with db.get_db() as con:
-        df = pd.read_sql_query("SELECT county FROM blocked_counties ORDER BY county", con)
-    st.dataframe(df, use_container_width=True)
+        df = pd.read_sql_query("SELECT county FROM blocked_counties ORDER BY LOWER(county)", con)
+    st.dataframe(df, use_container_width=True, height=260)
+
     if role_is_admin():
-        newc = st.text_input("Add county")
-        c1, c2 = st.columns(2)
-        if c1.button("Add") and newc:
-            with db.get_db() as con:
-                con.execute("INSERT OR IGNORE INTO blocked_counties(county) VALUES(?)", (newc.strip(),))
-            st.success("Added."); st.rerun()
-        if c2.button("Apply rule to candidates"):
+        st.markdown("#### Add multiple")
+        add_text = st.text_area(
+            "Paste counties here (use commas, semicolons, or new lines)",
+            placeholder="Cork, Kerry; Waterford\nGalway"
+        )
+        add_cols = st.columns(2)
+        if add_cols[0].button("Add counties", type="primary"):
+            items = parse_multi(add_text)
+            if not items:
+                st.warning("No counties detected.")
+            else:
+                with db.get_db() as con:
+                    con.executemany(
+                        "INSERT OR IGNORE INTO blocked_counties(county) VALUES(?)",
+                        [(c,) for c in items]
+                    )
+                st.success(f"Added {len(items)} item(s).")
+                st.rerun()
+
+        st.markdown("#### Remove multiple")
+        rem_text = st.text_area(
+            "Counties to remove (same separators)",
+            placeholder="Tipperary; Limerick\nMayo"
+        )
+        rem_cols = st.columns(2)
+        if rem_cols[0].button("Remove counties", type="secondary"):
+            items = parse_multi(rem_text)
+            if not items:
+                st.warning("No counties detected.")
+            else:
+                # Case-insensitive delete
+                with db.get_db() as con:
+                    con.executemany(
+                        "DELETE FROM blocked_counties WHERE LOWER(county)=LOWER(?)",
+                        [(c,) for c in items]
+                    )
+                st.success(f"Removed {len(items)} item(s) (where present).")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### Apply rule")
+        if st.button("Apply blocked counties to candidates"):
             with db.get_db() as con:
                 blocked = [r[0].strip().lower() for r in con.execute("SELECT county FROM blocked_counties").fetchall()]
                 rows = con.execute("SELECT id,county,dnc_override FROM candidates").fetchall()
@@ -395,6 +440,7 @@ def page_hiring_areas():
                         n+=1
                 con.commit()
             st.success(f"Applied to {n} candidate(s).")
+
 
 def page_compliance():
     st.markdown("### Compliance")
