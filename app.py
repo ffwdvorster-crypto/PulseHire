@@ -5,7 +5,7 @@ from theme import apply_theme
 import db
 from auth import login_user, ensure_admin_exists, create_user, change_password, list_users
 from scoring import SEED_KEYWORDS, extract_text, score_cv
-from ingestion import ingest_testgorilla, ingest_interview_notes
+from ingestion import ingest_testgorilla, ingest_interview_notes, ingest_applications
 from compliance import compliance_text
 
 UPLOAD_DIR = "uploads"
@@ -43,16 +43,30 @@ if st.session_state["user"] is None:
 
 user = st.session_state["user"]
 
-# ---------- Sidebar Nav (selectbox, no radio) ----------
+# ---------- Sidebar Nav (buttons with icons) ----------
+def nav_button(label, page_key, emoji):
+    # Render a “selected” state
+    is_active = (st.session_state["page"] == page_key)
+    style = "background-color: rgba(0,184,159,0.15); border: 1px solid #00b89f;" if is_active else ""
+    return st.sidebar.button(f"{emoji}  {label}", use_container_width=True, key=f"nav_{page_key}", help=label, on_click=lambda: st.session_state.update({"page": page_key}), type="secondary") if not is_active else st.sidebar.button(f"{emoji}  {label}", use_container_width=True, key=f"nav_{page_key}", help=label, on_click=lambda: st.session_state.update({"page": page_key}), type="primary")
+
 with st.sidebar:
     st.success(f"{user['name']} · {user['role'].title()}")
-    pages = ["Dashboard","Campaigns","Active recruitment","Candidates","Do Not Call","Keywords","Hiring Areas","Compliance","Changelog"]
+    st.markdown("#### Navigation")
+    nav_button("Dashboard",          "Dashboard",          "🏠")
+    nav_button("Campaigns",          "Campaigns",          "🧭")
+    nav_button("Active recruitment", "Active recruitment", "🚀")
+    nav_button("Candidates",         "Candidates",         "👤")
+    nav_button("Do Not Call",        "Do Not Call",        "⛔")
+    nav_button("Keywords",           "Keywords",           "🧩")
+    nav_button("Hiring Areas",       "Hiring Areas",       "🗺️")
+    nav_button("Compliance",         "Compliance",         "⚖️")
+    nav_button("Changelog",          "Changelog",          "📝")
     if user["role"]=="admin":
-        pages += ["Admin","Account"]
-    else:
-        pages += ["Account"]
-    st.session_state["page"] = st.selectbox("Navigation", pages, index=pages.index(st.session_state["page"]) if st.session_state["page"] in pages else 0)
-    if st.button("Log out"):
+        nav_button("Admin",          "Admin",              "🛠️")
+    nav_button("Account",            "Account",            "👤🔑")
+    st.markdown("---")
+    if st.button("Log out", use_container_width=True):
         st.session_state["user"]=None; st.rerun()
 
 # ---------- Helpers ----------
@@ -136,6 +150,16 @@ def page_active_recruitment():
 
 def page_candidates():
     st.markdown("### Candidates")
+
+    # Bulk import Applications (Excel)
+    with st.expander("📥 Bulk import from Application Excel"):
+        up = st.file_uploader("Upload Application Excel (.xlsx)", type=["xlsx"], key="apps_xlsx")
+        if up and st.button("Import applications", type="primary"):
+            res = ingest_applications(up)  # returns dict summary
+            st.success(f"Imported: {res['inserted']} inserted, {res['updated']} updated, {res['dnc_applied']} auto-DNC.")
+            if res.get("skipped"):
+                st.caption(f"Skipped rows (missing name/email): {res['skipped']}")
+
     # Filters
     colf = st.columns(5)
     with colf[0]:
@@ -163,12 +187,14 @@ def page_candidates():
     q+=" ORDER BY LOWER(name)"
     with db.get_db() as con:
         df = pd.read_sql_query(q, con, params=params)
+
     left, right = st.columns([1,2])
     with left:
         st.caption("Candidates (A–Z)")
         names = [f"{r['name'] or '—'}  •  {r['email'] or ''}  (#{r['id']})" for _, r in df.iterrows()]
         selected = st.selectbox("Pick", names, index=0 if not df.empty else None, placeholder="No candidates")
-        sel_id = int(selected.split("#")[-1][:-1]) if selected else None
+        sel_id = int(selected.split('#')[-1][:-1]) if selected else None
+
         if role_can_edit():
             with st.form("add_cand"):
                 st.subheader("Add candidate")
@@ -181,6 +207,7 @@ def page_candidates():
                 with db.get_db() as con:
                     con.execute("INSERT INTO candidates(name,email,phone,county,status) VALUES(?,?,?,?,?)",(nm or None, em or None, ph or None, co or None, "Applied"))
                 st.success("Added."); st.rerun()
+
         # Bulk actions
         if role_can_edit() and not df.empty:
             st.subheader("Bulk actions")
@@ -201,6 +228,7 @@ def page_candidates():
                 with db.get_db() as con:
                     con.executemany("UPDATE candidates SET campaign=? WHERE id=?", [(camp, i) for i in ids])
                 st.success("Campaign assigned.")
+
     with right:
         if sel_id:
             render_candidate(sel_id)
@@ -389,8 +417,7 @@ def page_changelog():
 
 def page_admin():
     if not role_is_admin():
-        st.warning("Admin only.")
-        return
+        st.warning("Admin only."); return
     st.markdown("### Admin")
     st.subheader("Create user")
     with st.form("create_user"):
