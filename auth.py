@@ -1,12 +1,14 @@
 import streamlit as st
 
-# Default admin credentials
+# Always-available default admin account
 DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "admin123"
 
 def require_login():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
+    if "username" not in st.session_state:
+        st.session_state.username = None
 
     if not st.session_state.logged_in:
         st.title("🔑 PulseHire Login")
@@ -17,6 +19,7 @@ def require_login():
         if st.button("Login"):
             if username == DEFAULT_USERNAME and password == DEFAULT_PASSWORD:
                 st.session_state.logged_in = True
+                st.session_state.username = username
                 st.success("Login successful ✅")
                 st.rerun()
             else:
@@ -24,4 +27,6 @@ def require_login():
 
         return False
 
+    # Already logged in
+    st.sidebar.success(f"Logged in as {st.session_state.username}")
     return True
