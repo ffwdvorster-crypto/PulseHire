@@ -1,0 +1,2 @@
+streamlit==1.48.1
+werkzeug==3.0.3
