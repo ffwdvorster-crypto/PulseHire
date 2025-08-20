@@ -247,37 +247,28 @@ def candidates_upload_ui():
 def imports_ui():
     st.subheader("📥 Imports")
     st.caption("Upload TestGorilla results and interview notes.")
-    test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.")
+    test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.", key="imports_test_toggle")
 
     tab1, tab2 = st.tabs(["TestGorilla", "Interview Notes"])
 
     with tab1:
-        tg = st.file_uploader("Upload TestGorilla CSV", type=["csv"], key="upload_tg")
+        tg = st.file_uploader("Upload TestGorilla CSV", type=["csv"], key="imports_tg_file")
         if tg:
             df = pd.read_csv(tg)
-            st.dataframe(df.head(20))
-            if st.button("Import TestGorilla"):
+            st.dataframe(df.head(20), use_container_width=True)
+            if st.button("Import TestGorilla", key="imports_tg_btn"):
                 n = ingestion.ingest_testgorilla(df, is_test=test_flag)
                 st.success(f"Imported {n} TestGorilla rows.")
 
     with tab2:
-        inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="upload_inv")
+        inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="imports_inv_file")
         if inv:
             df = pd.read_csv(inv)
-            st.dataframe(df.head(20))
-            if st.button("Import Interview Notes"):
+            st.dataframe(df.head(20), use_container_width=True)
+            if st.button("Import Interview Notes", key="imports_inv_btn"):
                 n = ingestion.ingest_interview_notes(df, is_test=test_flag)
                 st.success(f"Imported {n} interview note rows.")
 
-
-    with tab2:
-        inv = st.file_uploader("Upload Interview Notes CSV", type=["csv"], key="inv")
-        if inv:
-            df = pd.read_csv(inv)
-            st.dataframe(df.head(20))
-            if st.button("Ingest Interview Notes"):
-                n = ingestion.ingest_interview_notes(df, is_test=test_flag)
-                st.success(f"Ingested {n} interview note rows.")
 
 def scoring_ui():
     st.subheader("✨ Keywords & Scoring")
