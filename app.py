@@ -1,7 +1,15 @@
+import os
+import io
+import pandas as pd
 import streamlit as st
-import toml, os
+from datetime import datetime
+import db
+import auth
+import ingestion
+import scoring
+import toml
 
-# Load theme from theme.toml if present
+# --- Load theme.toml manually (avoids needing .streamlit/config.toml) ---
 theme_file = os.path.join(os.path.dirname(__file__), "theme.toml")
 if os.path.exists(theme_file):
     theme = toml.load(theme_file).get("theme", {})
@@ -12,18 +20,11 @@ if os.path.exists(theme_file):
         initial_sidebar_state="expanded"
     )
 else:
-    st.set_page_config(page_title="PulseHire ATS", page_icon="💙", layout="wide")
-import os
-import io
-import pandas as pd
-import streamlit as st
-from datetime import datetime
-import db
-import auth
-import ingestion
-import scoring
-
-st.set_page_config(page_title="PulseHire ATS", page_icon="💙", layout="wide")
+    st.set_page_config(
+        page_title="PulseHire ATS",
+        page_icon="💙",
+        layout="wide"
+    )
 
 # Ensure DB + seed keywords + admin
 db.init_db(seed=True, seed_keywords=scoring.DEFAULT_KEYWORDS, seed_admin=True)
