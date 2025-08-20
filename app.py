@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import datetime as dt
-from auth import login_screen, require_login
+from auth import require_login
 
 def get_db():
     return sqlite3.connect("pulsehire.db", check_same_thread=False)
