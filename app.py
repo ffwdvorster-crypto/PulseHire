@@ -234,15 +234,16 @@ def candidates_upload_ui():
     st.subheader("👥 Candidates (Applications)")
     st.caption("Bulk upload candidates/applications as CSV.")
 
-    test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.")
-    f = st.file_uploader("Upload applications CSV", type=["csv"])
+    test_flag = st.toggle("Upload as Test", value=False, help="Store uploaded data as test-only.", key="apps_test_toggle")
+    f = st.file_uploader("Upload applications CSV", type=["csv"], key="apps_file")
     if f is not None:
         df = pd.read_csv(f)
         st.write("Preview:")
-        st.dataframe(df.head(20))
-        if st.button("Ingest applications"):
+        st.dataframe(df.head(20), use_container_width=True)
+        if st.button("Ingest applications", key="apps_ingest_btn"):
             n = ingestion.ingest_applications(df, is_test=test_flag)
             st.success(f"Ingested {n} application rows.")
+
 
 def imports_ui():
     st.subheader("📥 Imports")
