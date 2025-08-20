@@ -1,3 +1,18 @@
+import streamlit as st
+import toml, os
+
+# Load theme from theme.toml if present
+theme_file = os.path.join(os.path.dirname(__file__), "theme.toml")
+if os.path.exists(theme_file):
+    theme = toml.load(theme_file).get("theme", {})
+    st.set_page_config(
+        page_title="PulseHire ATS",
+        page_icon="💙",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+else:
+    st.set_page_config(page_title="PulseHire ATS", page_icon="💙", layout="wide")
 import os
 import io
 import pandas as pd
