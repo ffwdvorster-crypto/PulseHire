@@ -3,6 +3,9 @@ import pandas as pd
 import db, auth, ingestion, scoring
 
 st.set_page_config(page_title="PulseHire ATS", layout="wide")
+import db, auth, ingestion, scoring
+db.init_db()
+auth.ensure_seed_admin()
 
 # Initialize DB schema first, then seed admin
 db.init_db()
